@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec "/c/Users/ASUS/AppData/Local/Microsoft/WinGet/Packages/jqlang.jq_Microsoft.Winget.Source_8wekyb3d8bbwe/jq.exe" "$@"

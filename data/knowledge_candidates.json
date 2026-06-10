@@ -1,0 +1,42 @@
+{
+  "candidates": {
+    "cand_08ab177d8a3e": {
+      "conditions": [],
+      "confidence": 0.85,
+      "conflict_with": "",
+      "created_at": "2026-06-10T14:46:18.007433+00:00",
+      "definition": "ARPU là doanh thu trung bình trên mỗi user trong kỳ",
+      "domain": "Revenue",
+      "formula": "total revenue / active users",
+      "id": "cand_08ab177d8a3e",
+      "kind": "metric",
+      "name": "ARPU",
+      "owner": "Team Finance",
+      "paraphrases": [
+        "average revenue per user",
+        "doanh thu trung bình trên mỗi user"
+      ],
+      "source_event_id": "evt_f3ab73ce3f87",
+      "status": "pending_review"
+    },
+    "cand_d7779fdab20f": {
+      "conditions": [],
+      "confidence": 0.72,
+      "conflict_with": "",
+      "created_at": "2026-06-10T14:33:58.660485+00:00",
+      "definition": "user có first payment",
+      "domain": "Growth",
+      "formula": null,
+      "id": "cand_d7779fdab20f",
+      "kind": "metric",
+      "name": "FPU",
+      "owner": "QuynhVM",
+      "paraphrases": [
+        "paid user đầu tiên"
+      ],
+      "source_event_id": "evt_45d825d7a446",
+      "status": "pending_review"
+    }
+  },
+  "schema_version": 1
+}
