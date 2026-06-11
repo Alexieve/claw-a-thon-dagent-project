@@ -4,19 +4,21 @@ Agent GreenNode AgentBase giúp team nghiệp vụ thu thập, parse, review, v�
 
 ## Agent Này Làm Gì
 
-- Nhận đoạn văn tự do từ stakeholder và lưu nguyên văn thành raw event.
-- Parse đoạn văn thành knowledge candidates như metric, term, dimension, business rule, hoặc synonym.
-- Cho reviewer approve/reject/edit candidate trước khi ghi vào knowledge base chuẩn.
-- Phát hiện conflict khi candidate mới có cùng tên nhưng định nghĩa khác approved knowledge.
-- Ingest nội dung file dạng text/pasted text và đưa qua cùng pipeline candidate review.
+- Hỗ trợ Flow A teaching nhiều lượt: user dạy, agent tóm tắt, user confirm rồi mới commit.
+- Knowledge mới sau khi confirm được ghi thẳng vào knowledge base chuẩn.
+- Knowledge đã tồn tại luôn tạo pending change để reviewer approve/reject trước khi cập nhật.
+- Owner gốc của knowledge không bị ghi đè khi có thay đổi từ người khác.
+- Ingest nội dung file dạng text/pasted text theo cùng policy: mới thì commit, existing thì pending change.
+- Search approved knowledge bằng LLM rerank nếu cấu hình LLM, fallback deterministic nếu không.
 - Phân tích một đoạn text để chỉ ra knowledge đã biết, đang chờ duyệt, đang conflict, hoặc còn thiếu.
 
 ## Cấu Trúc Dự Án
 
 - `main.py` - Điểm vào AgentBase và định tuyến action mới.
-- `knowledge_store.py` - Storage local, parser, review workflow, conflict detection.
+- `knowledge_store.py` - Storage local, parser, teaching session, review workflow, KB versioning.
 - `data/raw_events.jsonl` - Append-only log lưu nguyên văn input.
-- `data/knowledge_candidates.json` - Candidate knowledge chờ review hoặc đã xử lý.
+- `data/teaching_sessions.json` - Session teaching nhiều lượt trước khi user confirm.
+- `data/knowledge_candidates.json` - Pending change hoặc candidate cũ cần review.
 - `data/knowledge_base.json` - Approved knowledge chuẩn.
 - `data/document_chunks.jsonl` - Chunk text từ file cứng.
 - `tests/test_knowledge_store.py` - Unit test cho storage/parser/review flow.
@@ -35,7 +37,15 @@ Khi phát triển local:
 cp .env.example .env
 ```
 
-LLM extraction là optional. Nếu không cấu hình `LLM_API_KEY`, `LLM_BASE_URL`, và `LLM_MODEL`, agent sẽ dùng deterministic fallback parser.
+LLM là optional. Nếu có `LLM_API_KEY`, `LLM_BASE_URL`, và `LLM_MODEL`, agent dùng LLM cho parse/summarize và rerank search. Nếu không, agent dùng deterministic fallback parser/search.
+
+Storage mặc định là JSON local trong `data/`. Để dùng Supabase/Postgres, cấu hình:
+
+```bash
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=require
+```
+
+Khi `DATABASE_URL` tồn tại, agent tự chạy migration trong `db/schema.sql` lúc boot và dùng Postgres cho KB, pending change, teaching session, raw event, document chunk.
 
 ## Chạy Local
 
@@ -61,22 +71,67 @@ Health check:
 curl http://127.0.0.1:8080/health
 ```
 
+Kiểm tra storage backend:
+
+```bash
+curl -X POST http://127.0.0.1:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"action": "storage_status"}'
+```
+
 ## API Examples
 
-Dạy agent bằng đoạn văn:
+Flow A - bắt đầu teaching session:
+
+```bash
+curl -X POST http://127.0.0.1:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "start_teach_session",
+    "message": "FPU là user có first payment. Team Growth hay gọi là paid user đầu tiên.",
+    "stakeholder": "Linh",
+    "team": "Growth"
+  }'
+```
+
+Thêm message vào session:
+
+```bash
+curl -X POST http://127.0.0.1:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "append_teach_message",
+    "session_id": "teach_xxx",
+    "message": "FPU thuộc domain Growth và tính theo first payment lifetime."
+  }'
+```
+
+Confirm session để commit:
+
+```bash
+curl -X POST http://127.0.0.1:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "confirm_teach_session",
+    "session_id": "teach_xxx",
+    "decision": "confirm"
+  }'
+```
+
+Dạy trực tiếp một đoạn đã được user confirm:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/invocations \
   -H "Content-Type: application/json" \
   -d '{
     "action": "teach_text",
-    "text": "FPU là user có first payment. Team Growth hay gọi là paid user đầu tiên.",
+    "text": "FPU là user có first payment.",
     "stakeholder": "Linh",
     "team": "Growth"
   }'
 ```
 
-Approve candidate:
+Approve pending change:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/invocations \
@@ -88,7 +143,7 @@ curl -X POST http://127.0.0.1:8080/invocations \
   }'
 ```
 
-Approve candidate sau khi sửa:
+Approve pending change sau khi sửa:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/invocations \
@@ -104,12 +159,12 @@ curl -X POST http://127.0.0.1:8080/invocations \
   }'
 ```
 
-Liệt kê candidate:
+Liệt kê pending change:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/invocations \
   -H "Content-Type: application/json" \
-  -d '{"action": "list_candidates", "status": "pending_review"}'
+  -d '{"action": "list_candidates", "status": "pending_change"}'
 ```
 
 Search approved knowledge:
@@ -139,6 +194,8 @@ curl -X POST http://127.0.0.1:8080/invocations \
     "text": "FPU là user có first payment."
   }'
 ```
+
+Nếu term trong file là knowledge mới, agent ghi thẳng vào KB. Nếu term đã tồn tại, agent tạo pending change để reviewer duyệt.
 
 ## Test
 

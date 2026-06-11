@@ -19,10 +19,15 @@ def build_help() -> dict[str, Any]:
         "agent": "business-knowledge-learning-agent",
         "purpose": "Thu thập, parse, review, và chuẩn hóa knowledge nghiệp vụ từ stakeholder và file text.",
         "actions": {
-            "teach_text": "Dạy agent bằng đoạn văn tự do. Fields: text, stakeholder, team, domain, owner.",
-            "review_candidate": "Approve/reject/edit candidate. Fields: candidate_id, decision, updates.",
+            "start_teach_session": "Bắt đầu Flow A teaching nhiều lượt. Fields: message, stakeholder, team, domain, owner.",
+            "append_teach_message": "Thêm message vào teaching session. Fields: session_id, message.",
+            "summarize_teach_session": "Tóm tắt draft knowledge để user confirm. Fields: session_id.",
+            "confirm_teach_session": "Confirm/cancel teaching session. Fields: session_id, decision.",
+            "teach_text": "Dạy knowledge đã được user confirm. New knowledge ghi thẳng KB, existing tạo pending change.",
+            "review_candidate": "Approve/reject pending change. Fields: candidate_id, decision, updates.",
             "list_candidates": "Liệt kê candidate theo status. Fields: status.",
-            "search_knowledge": "Tìm approved knowledge. Fields: query.",
+            "search_knowledge": "Tìm approved knowledge, dùng LLM rerank nếu được cấu hình. Fields: query.",
+            "storage_status": "Kiểm tra agent đang dùng JSON local hay Postgres/Supabase.",
             "analyze_text": "Phân tích text dựa trên approved/pending/conflict knowledge. Fields: text.",
             "ingest_document": "Ingest nội dung file dạng text. Fields: text, title, stakeholder, team, domain, owner.",
             "help": "Hiển thị các action được hỗ trợ.",
@@ -63,9 +68,36 @@ def handler(payload: dict, context: RequestContext) -> dict:
                 owner=str(payload.get("owner") or ""),
             )
             result["answer"] = (
-                f"Đã lưu raw event và tạo {len(result['candidates'])} candidate cần review."
-                if result["candidates"]
-                else "Đã lưu raw event nhưng chưa parse được candidate rõ ràng."
+                f"Đã tạo {len(result['knowledge_created'])} knowledge mới và {len(result['change_requests'])} pending change."
+                if result["knowledge_created"] or result["change_requests"]
+                else "Đã lưu raw event nhưng chưa parse được knowledge rõ ràng."
+            )
+        elif action == "start_teach_session":
+            result = store.start_teach_session(
+                message=str(payload.get("message") or payload.get("text") or ""),
+                stakeholder=str(payload.get("stakeholder") or ""),
+                team=str(payload.get("team") or ""),
+                domain=str(payload.get("domain") or ""),
+                owner=str(payload.get("owner") or ""),
+            )
+        elif action == "append_teach_message":
+            result = store.append_teach_message(
+                session_id=str(payload.get("session_id") or ""),
+                message=str(payload.get("message") or payload.get("text") or ""),
+            )
+        elif action == "summarize_teach_session":
+            result = store.summarize_teach_session(session_id=str(payload.get("session_id") or ""))
+        elif action == "confirm_teach_session":
+            result = store.confirm_teach_session(
+                session_id=str(payload.get("session_id") or ""),
+                decision=str(payload.get("decision") or "confirm"),
+            )
+            result["answer"] = (
+                f"Đã ghi {len(result['knowledge_created'])} knowledge mới vào KB."
+                if result.get("knowledge_created")
+                else f"Đã tạo {len(result.get('change_requests', []))} pending change cần duyệt."
+                if result.get("change_requests")
+                else "Teaching session đã được hủy."
             )
         elif action == "review_candidate":
             result = store.review_candidate(
@@ -86,6 +118,8 @@ def handler(payload: dict, context: RequestContext) -> dict:
             result = {
                 "knowledge": store.search_knowledge(query=str(payload.get("query") or "")),
             }
+        elif action == "storage_status":
+            result = store.storage_status()
         elif action == "analyze_text":
             analysis = store.analyze_text(str(payload.get("text") or payload.get("message") or ""))
             result = {"answer": build_analyze_answer(analysis), **analysis}
