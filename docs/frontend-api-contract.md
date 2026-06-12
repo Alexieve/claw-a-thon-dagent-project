@@ -78,7 +78,23 @@ if (response.status === "error") {
 
 Các action admin khác không cần dùng trong Chat UI phase này.
 
-## 4. Chat Request
+## 4. Backend Refactor & Fast-Path Compatibility
+
+Backend hiện đã tách phần nội bộ ra `agent_core/*`, nhưng FE contract không đổi:
+
+- FE vẫn chỉ gọi `POST /invocations`.
+- Request/response envelope vẫn giữ nguyên.
+- Chat UI vẫn dựa vào `ChatRequest`, `ChatResult`, `requires_confirmation`, `pending_action_id`, `missing`, `sql`.
+- FE không phụ thuộc tên module backend như `knowledge_store.py` hay `agent_core/*`.
+
+Fast-path là tối ưu backend dự kiến cho các câu follow-up rõ ràng trong session, ví dụ: "cần breakdown gì không?", "thiếu gì nữa không?", "đã đủ rõ chưa?". Khi fast-path được implement, mục tiêu là giảm latency bằng cách bỏ qua một số bước planner nặng. Contract FE vẫn nên giữ ổn định:
+
+- FE vẫn gửi action `chat` như hiện tại.
+- FE vẫn render `result.answer`.
+- FE vẫn quyết định UI bằng structured fields.
+- Nếu backend thêm `intent` mới như `pending_data_query_advice`, FE có thể coi như intent optional và không cần logic riêng.
+
+## 5. Chat Request
 
 ```ts
 interface ChatRequest {
@@ -154,7 +170,7 @@ Bổ sung/sửa pending request:
 
 FE không cần tự gọi action refine riêng. Backend tự hiểu follow-up trong cùng `session_id`.
 
-## 5. Chat Result
+## 6. Chat Result
 
 ```ts
 type ChatStatus =
@@ -227,7 +243,7 @@ Field dictionary cho FE:
 | Field | FE render? | Ý nghĩa |
 | --- | --- | --- |
 | `status` | Có, để quyết định UI state | Trạng thái xử lý hiện tại. Không parse từ `answer`. |
-| `intent` | Optional | Backend phân loại ý định: hỏi knowledge, data SQL, teaching, recall. Dùng cho analytics/badge nếu cần. |
+| `intent` | Optional | Backend phân loại ý định: hỏi knowledge, data SQL, teaching, recall. Dùng cho analytics/badge nếu cần. FE không nên switch UI cứng theo intent. |
 | `answer` | Có | Text assistant hiển thị cho user. Đây là LLM-synthesized presentation text. Không parse id/state từ field này. |
 | `question` | Optional | Câu hỏi backend đang xử lý, có thể là câu gốc hoặc câu đã refine. |
 | `chat_session_id` | Có | Session id canonical. FE lưu lại và gửi ở request tiếp theo. |
@@ -249,7 +265,7 @@ Field dictionary cho FE:
 | `explanation` | Optional | Giải thích SQL hoặc reasoning ngắn. Có thể là string hoặc array tùy action. |
 | `debug` | Không render mặc định | Dành cho dev diagnostics, latency, LLM fallback, memory status. |
 
-## 6. Status Mapping Cho UI
+## 7. Status Mapping Cho UI
 
 | `result.status` | FE nên làm gì |
 | --- | --- |
@@ -285,7 +301,9 @@ const showSql = result.status === "sql_draft" && Boolean(result.sql);
 
 Important: FE không parse `answer` để tìm `pending_action_id`, SQL, trạng thái, hay missing fields. Tất cả logic UI phải đọc structured fields.
 
-## 7. Data Query + Confirm Workflow
+Fast-path sau này có thể đổi `intent` hoặc giảm debug latency, nhưng không nên đổi rule UI ở bảng trên.
+
+## 8. Data Query + Confirm Workflow
 
 Flow data mơ hồ:
 
@@ -319,7 +337,7 @@ sequenceDiagram
   FE-->>U: Render answer, optionally SQL/missing cards
 ```
 
-## 8. Example Responses
+## 9. Example Responses
 
 ### 8.1. Knowledge Answer
 
@@ -468,7 +486,7 @@ sequenceDiagram
 }
 ```
 
-## 9. Debug Context
+## 10. Debug Context
 
 `debug` chỉ dành cho dev tools hoặc diagnostics screen.
 
@@ -506,7 +524,9 @@ Useful debug fields:
 
 FE không nên render `debug` cho user cuối.
 
-## 10. Search Knowledge
+Fast-path nếu được bật sau này có thể làm `latency_ms.planner` rất thấp hoặc không xuất hiện trong một số response. FE diagnostics nên handle thiếu key bằng fallback `0` hoặc "N/A".
+
+## 11. Search Knowledge
 
 Request:
 
@@ -539,7 +559,7 @@ type SearchKnowledgeResponse = AgentApiResponse<{
 | `status` | Trạng thái knowledge. FE thường chỉ hiển thị approved records. |
 | `version` | Version knowledge. |
 
-## 11. Storage Status
+## 12. Storage Status
 
 Request:
 
@@ -573,7 +593,7 @@ type StorageStatusResponse = AgentApiResponse<{
 | `chat_context_event_limit` | Số event gần nhất dùng làm context. |
 | `chat_context_fallback_on_memory_error` | Backend có fallback khi memory lỗi hay không. |
 
-## 12. FE Integration Checklist
+## 13. FE Integration Checklist
 
 - Luôn gửi `session_id` ổn định cho một conversation.
 - Sau mỗi chat response, lưu `result.chat_session_id`.

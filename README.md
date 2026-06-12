@@ -17,8 +17,17 @@ Agent GreenNode AgentBase giúp team nghiệp vụ thu thập, parse, review, v�
 
 ## Cấu Trúc Dự Án
 
-- `main.py` - Điểm vào AgentBase và định tuyến action mới.
-- `knowledge_store.py` - Storage local, parser, teaching session, review workflow, KB versioning.
+- `main.py` - Điểm vào AgentBase runtime.
+- `api_contracts.py` - Router/action registry và response envelope cho `/invocations`.
+- `knowledge_store.py` - Orchestrator chính cho chat, teaching, review workflow, data-question guardrails.
+- `agent_core/` - Các module hạ tầng đã tách khỏi `knowledge_store.py`:
+  - `constants.py` - Đường dẫn data/schema và constants dùng chung.
+  - `utils.py` - Normalize text, id/time helpers, acronym/parser helpers.
+  - `llm.py` - OpenAI-compatible LLM client.
+  - `parser.py` - Knowledge parser/ranker.
+  - `storage.py` - Postgres/Supabase storage adapter.
+  - `memory.py` - Local và AgentBase Memory event stores.
+  - `runtime_skills.py` - Runtime skill discovery/selection payload.
 - `data/raw_events.jsonl` - Append-only log lưu nguyên văn input.
 - `data/teaching_sessions.json` - Session teaching nhiều lượt trước khi user confirm.
 - `data/chat_sessions.json` - Session hội thoại freeform, pending actions, và trạng thái hỏi/dạy xen kẽ.

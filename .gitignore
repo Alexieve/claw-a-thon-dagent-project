@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
+.DS_Store
+.agent-tools/
 .env
 .greennode.json
 .agentbase/

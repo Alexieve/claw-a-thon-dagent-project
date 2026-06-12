@@ -62,6 +62,7 @@ export type ChatIntent =
   | "conversation_recall"
   | "pending_status"
   | "runtime_skill"
+  /** Future fast-path intents may be added; FE should not hard-switch UI on intent. */
   | string;
 
 export interface PendingAction {
@@ -109,7 +110,7 @@ export interface DebugContext {
 export interface ChatResult {
   /** Machine-readable state for FE UI decisions. */
   status: ChatStatus;
-  /** Backend-classified intent. Useful for analytics/badges. */
+  /** Backend-classified intent. Useful for analytics/badges; do not hard-switch UI on this. */
   intent: ChatIntent;
   /** User-facing assistant text. Render this, but never parse it for ids/state/SQL. */
   answer: string;

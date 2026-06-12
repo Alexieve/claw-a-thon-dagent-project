@@ -242,6 +242,13 @@ class KnowledgeStoreTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             store.chat(message="RPU là gì?", user_id="quynh", session_id="strict-memory")
 
+    def test_auto_context_store_resolves_without_memory_name_error(self):
+        store = self.make_store(chat_context_backend="auto", chat_context_memory_id="mem_test")
+
+        backend, _event_store, _reason = store._resolve_context_store(user_id="quynh", session_id="auto-memory")
+
+        self.assertIn(backend, {"agentbase", "local"})
+
     def test_teach_text_confirmed_new_knowledge_goes_directly_to_kb(self):
         store = self.make_store()
 
