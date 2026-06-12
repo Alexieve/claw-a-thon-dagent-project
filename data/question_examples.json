@@ -1,0 +1,1165 @@
+{
+  "examples": {
+    "qex_zlp_air_view_01": {
+      "concepts": [
+        "unique searcher",
+        "search_date",
+        "daily"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #1. Make clear: unique searcher hay lượt search? (biz nói \"bao nhiêu người\" → unique, nhưng confirm). Note: —",
+      "id": "qex_zlp_air_view_01",
+      "owner": "Zalopay OTA",
+      "question": "Mỗi ngày bao nhiêu người tìm vé? ✅",
+      "sql": "SELECT search_date,\n       COUNT(DISTINCT user_id) AS unique_searcher,\n       COUNT(*)                AS search_cnt\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_02": {
+      "concepts": [
+        "unique searcher",
+        "departure_date",
+        "daily"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #2. Make clear: đếm theo departure_date (ngày muốn bay) — KHÁC #1; có giới hạn search_date không (vd chỉ search trong tháng 2)? Note: demand curve forward-looking",
+      "id": "qex_zlp_air_view_02",
+      "owner": "Zalopay OTA",
+      "question": "Nhu cầu bay dồn vào ngày nào? ✅",
+      "sql": "SELECT departure_date, COUNT(DISTINCT user_id) AS unique_searcher\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_03": {
+      "concepts": [
+        "lượt search",
+        "hour(activity_time)",
+        "0–23h"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #3. Make clear: lượt search hay unique searcher per giờ? Giờ theo activity_time (local). Note: —",
+      "id": "qex_zlp_air_view_03",
+      "owner": "Zalopay OTA",
+      "question": "User search giờ nào trong ngày? ✅",
+      "sql": "SELECT EXTRACT(HOUR FROM activity_time) AS hr,\n       COUNT(*) AS search_cnt\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "activity_time",
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_04": {
+      "concepts": [
+        "lượt search",
+        "search_day_in_week",
+        "weekday"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #4. Make clear: #4 dùng search_day_in_week, #5 dùng departure_day_in_week — biz hay lẫn 2 cái, hỏi rõ \"thứ user bấm tìm\" hay \"thứ user muốn bay\". Note: —",
+      "id": "qex_zlp_air_view_04",
+      "owner": "Zalopay OTA",
+      "question": "Search rơi vào thứ nào? ✅",
+      "sql": "SELECT search_day_in_week AS dow,            -- #5: thay bằng departure_day_in_week\n       COUNT(*) AS search_cnt\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1\nORDER BY CASE search_day_in_week WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3\n  WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 WHEN 'Sunday' THEN 7 END;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_05": {
+      "concepts": [
+        "lượt search",
+        "departure_day_in_week",
+        "weekday"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #5. Make clear: #4 dùng search_day_in_week, #5 dùng departure_day_in_week — biz hay lẫn 2 cái, hỏi rõ \"thứ user bấm tìm\" hay \"thứ user muốn bay\". Note: —",
+      "id": "qex_zlp_air_view_05",
+      "owner": "Zalopay OTA",
+      "question": "Muốn bay vào thứ nào? ✅",
+      "sql": "SELECT search_day_in_week AS dow,            -- #5: thay bằng departure_day_in_week\n       COUNT(*) AS search_cnt\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1\nORDER BY CASE search_day_in_week WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2 WHEN 'Wednesday' THEN 3\n  WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5 WHEN 'Saturday' THEN 6 WHEN 'Sunday' THEN 7 END;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_06": {
+      "concepts": [
+        "unique searcher (+ % share)",
+        "range search_date",
+        "route tách chiều"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #6. Make clear: Top N? Tách chiều hay gộp 2 chiều (→ #28)? Theo airport hay city (→ #27)? Lượt search (frequency) hay unique searcher? — đưa cả 2 cột đối chiếu, rank lệch nhau = route bị \"soi giá\" lặp. Note: hỏi biz: top N? gộp 2 chiều?",
+      "id": "qex_zlp_air_view_06",
+      "owner": "Zalopay OTA",
+      "question": "Top route được tìm nhiều nhất? ✅",
+      "sql": "SELECT route,\n       COUNT(*)                AS search_cnt,\n       COUNT(DISTINCT user_id) AS unique_searcher,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct_share\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 2 DESC\nLIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_07": {
+      "concepts": [
+        "unique searcher",
+        "range search_date",
+        "dest"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #7. Make clear: dest gồm cả sân bay quốc tế (440 code) — chỉ domestic? Gom theo city? Note: dest có 440 code, gồm intl",
+      "id": "qex_zlp_air_view_07",
+      "owner": "Zalopay OTA",
+      "question": "Top điểm đến hot? ✅",
+      "sql": "SELECT dest, COUNT(DISTINCT user_id) AS unique_searcher\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 2 DESC LIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_08": {
+      "concepts": [
+        "% lượt search",
+        "range search_date",
+        "trip_type"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #8. Make clear: theo lượt search hay theo user (1 user có thể search cả 2 loại → user-level tổng >100%)? Note: One-way ~83% baseline",
+      "id": "qex_zlp_air_view_08",
+      "owner": "Zalopay OTA",
+      "question": "Tỷ lệ tìm 1 chiều vs khứ hồi?",
+      "sql": "SELECT trip_type,\n       COUNT(*) AS search_cnt,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_09": {
+      "concepts": [
+        "lượt search (% theo bucket)",
+        "range search_date",
+        "user_search_group"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #9. Make clear: đây là intent lúc search (user_search_group), khác hành vi lúc mua (#18) — biz muốn cái nào? Note: loại 75 dòng Unknown",
+      "id": "qex_zlp_air_view_09",
+      "owner": "Zalopay OTA",
+      "question": "User định đặt sớm hay sát ngày?",
+      "sql": "SELECT user_search_group,\n       COUNT(*) AS search_cnt,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\n  AND user_search_group <> 'Unknown'\nGROUP BY 1\nORDER BY CASE user_search_group WHEN 'Same day' THEN 0 WHEN '1-3 days' THEN 1 WHEN '4-7 days' THEN 2\n  WHEN '8-14 days' THEN 3 WHEN '15-30 days' THEN 4 WHEN '31-60 days' THEN 5 WHEN '>60 days' THEN 6 END;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_10": {
+      "concepts": [
+        "transaction; unique paying user",
+        "date(reqDate)",
+        "daily × provider"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #10. Make clear: theo ngày mua reqDate (không phải ngày bay); có cắt theo provider không? Note: —",
+      "id": "qex_zlp_air_view_10",
+      "owner": "Zalopay OTA",
+      "question": "Mỗi ngày bao nhiêu đơn / khách mua? ✅",
+      "sql": "SELECT date(reqDate) AS pay_date,\n       COUNT(transID)         AS txn,\n       COUNT(DISTINCT userID) AS paying_user\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_11": {
+      "concepts": [
+        "TPV = SUM(amount)",
+        "date(reqDate)",
+        "daily/monthly",
+        "TPV"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #11. Make clear: TPV gross (chưa refund) — biz có đang kỳ vọng doanh thu thực không? Nói rõ ngay. Note: gross, chưa có refund",
+      "id": "qex_zlp_air_view_11",
+      "owner": "Zalopay OTA",
+      "question": "TPV theo ngày/tháng?",
+      "sql": "SELECT date_trunc('month', reqDate) AS ym,   -- daily: date(reqDate)\n       SUM(amount) AS tpv\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_12": {
+      "concepts": [
+        "transaction",
+        "flight_date",
+        "daily"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #12. Make clear: trục thời gian là flight_date; vẫn nên giới hạn thêm range mua (reqDate) nếu biz hỏi \"vé Tết đã bán\". Note: —",
+      "id": "qex_zlp_air_view_12",
+      "owner": "Zalopay OTA",
+      "question": "Đơn dồn vào ngày bay nào? ✅",
+      "sql": "SELECT flight_date, COUNT(transID) AS txn\nFROM payment_air\nWHERE flight_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_13": {
+      "concepts": [
+        "transaction",
+        "hour(reqDate) / weekday",
+        "hour / weekday × provider"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #13. Make clear: giờ/thứ theo reqDate. Cắt provider? Note: —",
+      "id": "qex_zlp_air_view_13",
+      "owner": "Zalopay OTA",
+      "question": "Mua vé giờ nào, thứ nào? ✅",
+      "sql": "SELECT EXTRACT(HOUR FROM reqDate) AS hr,     -- theo thứ: format_datetime(reqDate, 'EEEE') AS dow\n       COUNT(transID) AS txn\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "reqDate",
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_14": {
+      "concepts": [
+        "transaction + paying user (+ % share)",
+        "range reqDate",
+        "route tách chiều"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #14. Make clear: như #6 (top N, chiều, airport/city) + rank theo transaction hay paying user — 2 bảng xếp hạng có thể khác nhau, đưa cả 2 cột. Note: —",
+      "id": "qex_zlp_air_view_14",
+      "owner": "Zalopay OTA",
+      "question": "Top route thực mua? ✅",
+      "sql": "SELECT route,\n       COUNT(transID)         AS txn,\n       COUNT(DISTINCT userID) AS paying_user,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (), 2) AS pct_txn\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 2 DESC LIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_15": {
+      "concepts": [
+        "transaction / TPV (% share)",
+        "range reqDate",
+        "appID×appUser"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #15. Make clear: \"theo hãng\" hay \"theo provider/appID\"? EnViet gom Bamboo/Vietravel/Sun PQ → nếu biz muốn theo hãng thật thì phần EnViet KHÔNG tách được, phải khai báo. Share theo transaction hay TPV? Note: ⚠ EnViet = third party gom Bamboo/Vietravel/Sun PQ → \"theo hãng\" ≠ \"theo appUser\", hỏi biz cắt theo gì",
+      "id": "qex_zlp_air_view_15",
+      "owner": "Zalopay OTA",
+      "question": "Thị phần các hãng/provider?",
+      "sql": "SELECT appID, appUser,\n       MAX(CASE WHEN flight_type = 'DOMESTIC' THEN 'DOM' ELSE 'INTL' END) AS dom_intl,\n       COUNT(transID) AS txn,\n       SUM(amount)    AS tpv,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (), 2) AS pct_txn,\n       ROUND(100.0 * SUM(amount)    / SUM(SUM(amount))    OVER (), 2) AS pct_tpv\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1, 2 ORDER BY txn DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_16": {
+      "concepts": [
+        "transaction / TPV",
+        "range reqDate",
+        "flight_type"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #16. Note: DOM ~97%",
+      "id": "qex_zlp_air_view_16",
+      "owner": "Zalopay OTA",
+      "question": "Domestic vs International chiếm bao nhiêu?",
+      "sql": "SELECT flight_type, COUNT(transID) AS txn, SUM(amount) AS tpv,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (), 2) AS pct_txn\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_17": {
+      "concepts": [
+        "transaction (% share)",
+        "range reqDate",
+        "round_type"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #17. Make clear: không có gì phải hỏi thêm — nhưng bắt buộc UPPER(), nếu không sẽ ra 4 dòng thay vì 2. Note: bắt buộc UPPER() trước khi group (lẫn case ở data T12/2024–T1/2025)",
+      "id": "qex_zlp_air_view_17",
+      "owner": "Zalopay OTA",
+      "question": "Mua 1 chiều hay khứ hồi?",
+      "sql": "SELECT CASE UPPER(round_type) WHEN 'ONEWAY' THEN 'OneWay' ELSE 'RoundTrip' END AS round_type_norm,\n       COUNT(transID) AS txn,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (), 2) AS pct\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_18": {
+      "concepts": [
+        "transaction (% theo bucket)",
+        "range reqDate",
+        "booking_window_group"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #18. Make clear: behavior lúc mua (booking_window_group) — đối chiếu intent lúc search là #9/#33. Note: bucket chuẩn: Same day → >60 days",
+      "id": "qex_zlp_air_view_18",
+      "owner": "Zalopay OTA",
+      "question": "Khách mua sớm hay sát ngày bay?",
+      "sql": "SELECT booking_window_group,\n       COUNT(transID) AS txn,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (), 2) AS pct\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1\nORDER BY CASE booking_window_group WHEN 'Same day' THEN 0 WHEN '1-3 days' THEN 1 WHEN '4-7 days' THEN 2\n  WHEN '8-14 days' THEN 3 WHEN '15-30 days' THEN 4 WHEN '31-60 days' THEN 5 WHEN '>60 days' THEN 6 END;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_19": {
+      "concepts": [
+        "AOV = TPV/transaction, payment_air, theo month(reqDate), grain = dimension chọn",
+        "AOV",
+        "DOM",
+        "INTL"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #19. Make clear: biz nói \"giá vé trung bình\" → hỏi ngay: per đơn (AOV) hay per vé (ATP)? ATP không tính được (thiếu ticket_num) — chốt AOV và nói rõ 1 đơn có thể nhiều vé. KHÔNG dùng AOV trả lời góc per-user (đó là ARPPU, #39). Spec: AOV = TPV/transaction, payment_air, theo month(reqDate), grain = dimension chọn Note: AOV per đơn, không phải per vé (thiếu ticket_num → không tính được ATP) và không dùng cho góc per-user",
+      "id": "qex_zlp_air_view_19",
+      "owner": "Zalopay OTA",
+      "question": "Giá trị đơn trung bình (AOV) theo tháng / hãng / route / DOM-INTL?",
+      "sql": "SELECT date_trunc('month', reqDate) AS ym,   -- đổi grain: appID / route / flight_type\n       CAST(SUM(amount) AS DOUBLE) / COUNT(transID) AS aov,   -- CAST tránh chia nguyên\n       COUNT(transID) AS txn\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_20": {
+      "concepts": [
+        "histogram/percentile amount, payment_air, range reqDate"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #20. Make clear: biz cần percentile hay danh sách đơn to bất thường để check? Ngưỡng outlier bao nhiêu? Spec: histogram/percentile amount, payment_air, range reqDate Note: range 592K–48.8M; p50/p90/p99 + outlier review",
+      "id": "qex_zlp_air_view_20",
+      "owner": "Zalopay OTA",
+      "question": "Phân phối giá trị đơn? Đơn to bất thường?",
+      "sql": "SELECT approx_percentile(amount, 0.5)  AS p50,\n       approx_percentile(amount, 0.9)  AS p90,\n       approx_percentile(amount, 0.99) AS p99,\n       MIN(amount) AS min_amt, MAX(amount) AS max_amt\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY;\n-- list outlier: SELECT * FROM payment_air WHERE amount > {{ threshold }} ORDER BY amount DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_21": {
+      "concepts": [
+        "median + phân phối booking_window, grain route / appUser / UPPER(round_type)"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #21. Make clear: so bằng median (mặc định, chống outlier) hay mean? Dimension nào trước? Spec: median + phân phối booking_window, grain route / appUser / UPPER(round_type) Note: RoundTrip & intl kỳ vọng đặt sớm hơn",
+      "id": "qex_zlp_air_view_21",
+      "owner": "Zalopay OTA",
+      "question": "Booking window khác nhau thế nào giữa các route / hãng / 1 chiều–khứ hồi?",
+      "sql": "SELECT route,                                 -- đổi: appID / UPPER(round_type) / flight_type\n       COUNT(transID) AS txn,\n       approx_percentile(booking_window, 0.5) AS median_bw,\n       AVG(booking_window) AS avg_bw\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 HAVING COUNT(transID) >= 30        -- đủ mẫu mới so\nORDER BY 2 DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_22": {
+      "concepts": [
+        "transaction theo days-to-Tết, so Tết 2026 vs Tết 2025, × provider"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #22. Make clear: mốc Tết = mùng 1 (Tết 2025: 2025-01-29; Tết 2026: 2026-02-17)? Window countdown ±bao nhiêu ngày? So transaction hay TPV? Spec: transaction theo days-to-Tết, so Tết 2026 vs Tết 2025, × provider Note: view sẵn: Overview Countdown + theo hãng",
+      "id": "qex_zlp_air_view_22",
+      "owner": "Zalopay OTA",
+      "question": "Càng gần Tết hành vi đặt vé đổi ra sao? ✅ (Countdown)",
+      "sql": "SELECT season, days_to_tet, COUNT(transID) AS txn\nFROM (\n  SELECT transID,\n         CASE WHEN reqDate < DATE '2025-06-01' THEN 'Tet 2025' ELSE 'Tet 2026' END AS season,\n         CASE WHEN reqDate < DATE '2025-06-01'\n              THEN date_diff('day', date(reqDate), DATE '2025-01-29')\n              ELSE date_diff('day', date(reqDate), DATE '2026-02-17') END AS days_to_tet\n  FROM payment_air\n) t\nWHERE days_to_tet BETWEEN -{{ n_after }} AND {{ n_before }}\nGROUP BY 1, 2 ORDER BY 2 DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_23": {
+      "concepts": [
+        "unique searcher theo departure_date × route, filter departure_date > today"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #23. Make clear: \"hot\" = searcher tăng so baseline nào (7 ngày trước? cùng route?)? Đây là demand chưa chắc supply. Spec: unique searcher theo departure_date × route, filter departure_date > today Note: đầu vào cho alert demand spike",
+      "id": "qex_zlp_air_view_23",
+      "owner": "Zalopay OTA",
+      "question": "Nhu cầu (search) cho từng ngày bay tương lai — ngày nào sắp \"cháy\"?",
+      "sql": "SELECT departure_date, route, COUNT(DISTINCT user_id) AS unique_searcher\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\n  AND departure_date > DATE '{{ to_date }}'\nGROUP BY 1, 2 HAVING COUNT(DISTINCT user_id) >= {{ min_searcher }}\nORDER BY 3 DESC LIMIT 50;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_24": {
+      "concepts": [
+        "AVG + phân phối lượt search và COUNT(DISTINCT route) per user_id, search_air, range search_date"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #24. Make clear: trong window nào (cả kỳ hay per tuần)? Trả phân phối, đừng chỉ mean (long tail nặng). Spec: AVG + phân phối lượt search và COUNT(DISTINCT route) per user_id, search_air, range search_date Note: 1.62M search / 125K user ≈ 13 lượt/user — xem phân phối, không chỉ mean",
+      "id": "qex_zlp_air_view_24",
+      "owner": "Zalopay OTA",
+      "question": "1 user search bao nhiêu lần / bao nhiêu route trước khi quyết?",
+      "sql": "WITH per_user AS (\n  SELECT user_id, COUNT(*) AS search_cnt, COUNT(DISTINCT route) AS route_cnt\n  FROM search_air\n  WHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\n  GROUP BY 1\n)\nSELECT CASE WHEN search_cnt = 1 THEN '1' WHEN search_cnt <= 5 THEN '2-5'\n            WHEN search_cnt <= 20 THEN '6-20' WHEN search_cnt <= 50 THEN '21-50'\n            ELSE '>50' END AS search_bucket,\n       COUNT(*) AS users,\n       AVG(route_cnt) AS avg_routes\nFROM per_user\nGROUP BY 1 ORDER BY MIN(search_cnt);",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "per_user"
+      ]
+    },
+    "qex_zlp_air_view_25": {
+      "concepts": [
+        "% trip_type (search) vs % UPPER(round_type) (payment), cùng range, cắt theo route"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #25. Make clear: so trên cùng range thời gian (search_date vs ngày mua); % theo lượt search vs % theo transaction — 2 đơn vị khác nhau, khai báo rõ là so tỷ trọng, không phải conversion. Spec: % trip_type (search) vs % UPPER(round_type) (payment), cùng range, cắt theo route Note: so sánh tỷ trọng 2 nguồn, chưa cần join user",
+      "id": "qex_zlp_air_view_25",
+      "owner": "Zalopay OTA",
+      "question": "Search khứ hồi nhiều (17%) nhưng mua khứ hồi ít (6.5%) — gap ở đâu?",
+      "sql": "SELECT 'search' AS src, trip_type AS type_norm,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct\nFROM search_air\nWHERE search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 2\nUNION ALL\nSELECT 'payment', CASE UPPER(round_type) WHEN 'ONEWAY' THEN 'One-way' ELSE 'Round-trip' END,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 2;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_26": {
+      "concepts": [
+        "transaction theo in_out_bound, filter flight_type=INTERNATIONAL"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #26. Make clear: cột 97% null → kết quả chỉ đại diện 598 dòng có giá trị, PHẢI nói trước với biz. Hỏi: cần đủ thì suy từ origin/dest (origin nước ngoài = inbound)? Spec: transaction theo in_out_bound, filter flight_type=INTERNATIONAL Note: ⚠ cột 97% null — chỉ dùng trên subset 598 dòng có giá trị, khai báo rõ",
+      "id": "qex_zlp_air_view_26",
+      "owner": "Zalopay OTA",
+      "question": "Chặng quốc tế: chiều đi hay chiều về nhiều hơn?",
+      "sql": "SELECT in_out_bound, COUNT(transID) AS txn, SUM(amount) AS tpv\nFROM payment_air\nWHERE flight_type = 'INTERNATIONAL'\n  AND in_out_bound IS NOT NULL AND in_out_bound <> ''\nGROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_27": {
+      "concepts": [
+        "unique searcher / transaction, grain city (map city→[airport codes])"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #27. Make clear: chốt bảng map city→airports với biz trước (SGN=TP.HCM, HAN=Hà Nội, DAD=Đà Nẵng, CXR=Nha Trang, PQC=Phú Quốc, VCA=Cần Thơ, HUI=Huế, VII=Vinh, UIH=Quy Nhơn...); city nào nhiều sân bay phải gom đủ. Spec: unique searcher / transaction, grain city (map city→[airport codes]) Note: cần build bảng map IATA→city trước (SGN/Tân Sơn Nhất...; 1 city nhiều sân bay)",
+      "id": "qex_zlp_air_view_27",
+      "owner": "Zalopay OTA",
+      "question": "Demand theo thành phố (gộp sân bay)?",
+      "sql": "WITH city_map AS (\n  SELECT * FROM (VALUES\n    ('SGN','TP.HCM'), ('HAN','Hà Nội'), ('DAD','Đà Nẵng'), ('CXR','Nha Trang'),\n    ('PQC','Phú Quốc'), ('VCA','Cần Thơ'), ('HUI','Huế'), ('VII','Vinh'), ('UIH','Quy Nhơn')\n    -- bổ sung đủ list trước khi chạy thật\n  ) AS t(airport, city)\n)\nSELECT cd.city AS dest_city, COUNT(DISTINCT s.user_id) AS unique_searcher\nFROM search_air s\nJOIN city_map cd ON cd.airport = s.dest\nWHERE s.search_date BETWEEN DATE '{{ from_date }}' AND DATE '{{ to_date }}'\nGROUP BY 1 ORDER BY 2 DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "city_map"
+      ]
+    },
+    "qex_zlp_air_view_28": {
+      "concepts": [
+        "transaction / searcher, grain LEAST‖GREATEST(origin,dest)"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #28. Make clear: confirm với biz là muốn \"cặp thành phố\" (SGN↔HAN) — vì view dashboard mặc định tách chiều, số sẽ khác hẳn. Spec: transaction / searcher, grain LEAST‖GREATEST(origin,dest) Note: biến thể của view Route, hỏi biz trước khi đổi grain",
+      "id": "qex_zlp_air_view_28",
+      "owner": "Zalopay OTA",
+      "question": "Route gộp 2 chiều — cặp thành phố nào lớn nhất?",
+      "sql": "SELECT least(origin, dest) || '-' || greatest(origin, dest) AS city_pair,\n       COUNT(transID) AS txn, COUNT(DISTINCT userID) AS paying_user\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 2 DESC LIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_29": {
+      "concepts": [
+        "unique buyer / unique searcher, match user_id, window search→pay X ngày (đề xuất 7), range chung"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #29. Spec: unique buyer / unique searcher, match user_id, window search→pay X ngày (đề xuất 7), range chung Note: đây là user-level conversion, không phải CR funnel",
+      "id": "qex_zlp_air_view_29",
+      "owner": "Zalopay OTA",
+      "question": "Bao nhiêu % người search rồi mua?",
+      "sql": "-- Conversion user-level: search → mua trong {{ window_days }} ngày (mặc định 7)\nWITH searcher AS (\n  SELECT user_id, MIN(activity_time) AS first_search\n  FROM search_air\n  WHERE search_date BETWEEN DATE '2025-12-01' AND DATE '2026-02-28'\n  GROUP BY 1\n),\nbuyer AS (\n  SELECT DISTINCT s.user_id\n  FROM searcher s\n  JOIN payment_air p\n    ON p.userID = s.user_id\n   AND p.reqDate >= s.first_search\n   AND p.reqDate <  s.first_search + INTERVAL '{{ window_days }}' DAY\n)\nSELECT COUNT(*)                                   AS searcher_cnt,\n       (SELECT COUNT(*) FROM buyer)               AS buyer_cnt,\n       ROUND(100.0 * (SELECT COUNT(*) FROM buyer) / COUNT(*), 2) AS conversion_pct\nFROM searcher;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "searcher",
+        "payment_air",
+        "buyer"
+      ]
+    },
+    "qex_zlp_air_view_30": {
+      "concepts": [
+        "conversion rate per route, match cùng user + cùng route, window X ngày"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #30. Spec: conversion rate per route, match cùng user + cùng route, window X ngày Note: output: bảng route × searcher × buyer × CR%, sort CR thấp",
+      "id": "qex_zlp_air_view_30",
+      "owner": "Zalopay OTA",
+      "question": "Conversion theo route — route nào search nhiều mua ít?",
+      "sql": "WITH s AS (\n  SELECT route, user_id, MIN(activity_time) AS first_search\n  FROM search_air\n  WHERE search_date BETWEEN DATE '2025-12-01' AND DATE '2026-02-28'\n  GROUP BY 1, 2\n),\nb AS (\n  SELECT s.route, s.user_id\n  FROM s\n  JOIN payment_air p\n    ON p.userID = s.user_id AND p.route = s.route        -- match cùng user + cùng route\n   AND p.reqDate >= s.first_search\n   AND p.reqDate <  s.first_search + INTERVAL '{{ window_days }}' DAY\n  GROUP BY 1, 2\n)\nSELECT s.route,\n       COUNT(DISTINCT s.user_id) AS searcher,\n       COUNT(DISTINCT b.user_id) AS buyer,\n       ROUND(100.0 * COUNT(DISTINCT b.user_id) / COUNT(DISTINCT s.user_id), 2) AS cr_pct\nFROM s LEFT JOIN b ON b.route = s.route AND b.user_id = s.user_id\nGROUP BY 1 HAVING COUNT(DISTINCT s.user_id) >= {{ min_searcher }}   -- đủ mẫu, vd 100\nORDER BY cr_pct ASC;       -- sort tăng dần = route \"search nhiều mua ít\" lên đầu",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "s",
+        "payment_air",
+        "b"
+      ]
+    },
+    "qex_zlp_air_view_31": {
+      "concepts": [
+        "median/phân phối (min(reqDate) − min(activity_time)) per user×route"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #31. Make clear: tính trên grain user×route (chuẩn) hay chỉ user? Đơn vị giờ hay ngày? Spec: median/phân phối (min(reqDate) − min(activity_time)) per user×route Note: time-to-purchase; cắt theo route, booking_window_group",
+      "id": "qex_zlp_air_view_31",
+      "owner": "Zalopay OTA",
+      "question": "Từ lần search đầu đến lúc mua mất bao lâu?",
+      "sql": "WITH first_search AS (\n  SELECT user_id, route, MIN(activity_time) AS first_search\n  FROM search_air\n  WHERE search_date BETWEEN DATE '2025-12-01' AND DATE '2026-02-28'\n  GROUP BY 1, 2\n),\nmatched AS (\n  SELECT fs.user_id, fs.route,\n         date_diff('second', fs.first_search, MIN(p.reqDate)) / 86400.0 AS days_to_buy\n  FROM first_search fs\n  JOIN payment_air p\n    ON p.userID = fs.user_id AND p.route = fs.route\n   AND p.reqDate >= fs.first_search\n  GROUP BY 1, 2, fs.first_search\n)\nSELECT approx_percentile(days_to_buy, 0.5)  AS median_days,\n       approx_percentile(days_to_buy, 0.75) AS p75_days,\n       approx_percentile(days_to_buy, 0.9)  AS p90_days,\n       COUNT(*) AS matched_pairs\nFROM matched;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "first_search",
+        "payment_air",
+        "matched"
+      ]
+    },
+    "qex_zlp_air_view_32": {
+      "concepts": [
+        "% buyer có route mua ∉ tập route đã search (window X ngày)"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #32. Make clear: \"khác\" = route mua không nằm trong BẤT KỲ route nào đã search trước đó (trong window)? Gồm cả chiều ngược (search SGN-HAN, mua HAN-SGN) — tính là khác hay giống? (đề xuất: chuẩn hóa gộp chiều trước khi so). Spec: % buyer có route mua ∉ tập route đã search (window X ngày) Note: đo \"đổi ý\" / search hộ",
+      "id": "qex_zlp_air_view_32",
+      "owner": "Zalopay OTA",
+      "question": "Khách search xong mua khác route không?",
+      "sql": "WITH buys AS (\n  SELECT userID, transID, route, reqDate\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n),\nmatched AS (\n  SELECT b.transID,\n         MAX(CASE WHEN s.route = b.route THEN 1 ELSE 0 END) AS same_route_searched\n  FROM buys b\n  JOIN search_air s\n    ON s.user_id = b.userID\n   AND s.activity_time <  b.reqDate\n   AND s.activity_time >= b.reqDate - INTERVAL '{{ window_days }}' DAY\n  GROUP BY 1\n)\nSELECT COUNT(*) AS buys_with_prior_search,\n       SUM(1 - same_route_searched) AS bought_diff_route,\n       ROUND(100.0 * SUM(1 - same_route_searched) / COUNT(*), 2) AS pct_diff_route\nFROM matched;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "buys",
+        "search_air",
+        "matched"
+      ]
+    },
+    "qex_zlp_air_view_33": {
+      "concepts": [
+        "so phân phối user_search_group (search) vs booking_window_group (payment) trên user đã match"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #33. Make clear: so phân phối 2 bucket trên cùng tập user đã match (không phải toàn bộ 2 bảng); loại Unknown bên search. Spec: so phân phối user_search_group (search) vs booking_window_group (payment) trên user đã match Note: cùng bucket structure, payment không có Unknown",
+      "id": "qex_zlp_air_view_33",
+      "owner": "Zalopay OTA",
+      "question": "Định đặt (day_diff lúc search) vs thực đặt (booking_window lúc mua) lệch nhau không?",
+      "sql": "WITH matched_user AS (\n  SELECT DISTINCT s.user_id\n  FROM search_air s JOIN payment_air p ON p.userID = s.user_id\n  WHERE s.search_date BETWEEN DATE '2025-12-01' AND DATE '2026-02-28'\n    AND p.reqDate >= DATE '2025-12-01' AND p.reqDate < DATE '2026-03-01'\n)\nSELECT 'search_intent' AS src, s.user_search_group AS bucket,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct\nFROM search_air s JOIN matched_user m ON m.user_id = s.user_id\nWHERE s.search_date BETWEEN DATE '2025-12-01' AND DATE '2026-02-28'\n  AND s.user_search_group <> 'Unknown'\nGROUP BY 2\nUNION ALL\nSELECT 'pay_behavior', p.booking_window_group,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)\nFROM payment_air p JOIN matched_user m ON m.user_id = p.userID\nWHERE p.reqDate >= DATE '2025-12-01' AND p.reqDate < DATE '2026-03-01'\nGROUP BY 2;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "payment_air",
+        "matched_user"
+      ]
+    },
+    "qex_zlp_air_view_34": {
+      "concepts": [
+        "user_id có ≥N lượt search route R trong X ngày, không có transaction"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #34. Make clear: ngưỡng ≥N lượt search (đề xuất 5)? Lookback X ngày? \"Chưa mua\" = chưa mua route đó hay chưa mua bất kỳ vé nào? Output cần cột gì cho CRM? Spec: user_id có ≥N lượt search route R trong X ngày, không có transaction Note: output list + route + lần search cuối; chốt N, X với biz",
+      "id": "qex_zlp_air_view_34",
+      "owner": "Zalopay OTA",
+      "question": "Danh sách user search nhiều chưa mua (remarketing)?",
+      "sql": "WITH intent AS (\n  SELECT user_id, route,\n         COUNT(*) AS search_cnt,\n         MAX(activity_time) AS last_search\n  FROM search_air\n  WHERE search_date >= date_add('day', -{{ lookback_days }}, DATE '{{ as_of_date }}')\n    AND search_date <= DATE '{{ as_of_date }}'\n  GROUP BY 1, 2 HAVING COUNT(*) >= {{ min_search }}\n)\nSELECT i.user_id, i.route, i.search_cnt, i.last_search\nFROM intent i\nLEFT JOIN payment_air p\n  ON p.userID = i.user_id                      -- thêm: AND p.route = i.route nếu \"chưa mua route đó\"\n AND p.reqDate >= date_add('day', -{{ lookback_days }}, DATE '{{ as_of_date }}')\nWHERE p.transID IS NULL\nORDER BY i.search_cnt DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "intent",
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_35": {
+      "concepts": [
+        "số ngày search distinct trước khi mua, per buyer"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #35. Make clear: khai báo đây là proxy — đếm số ngày có search trước khi mua, KHÔNG phải số session (không có tracking_session_id). Spec: số ngày search distinct trước khi mua, per buyer Note: proxy cho session count — khai báo là proxy, không phải tracking_session_id",
+      "id": "qex_zlp_air_view_35",
+      "owner": "Zalopay OTA",
+      "question": "Searcher mua trong bao nhiêu lần mở lại? (proxy)",
+      "sql": "WITH first_buy AS (\n  SELECT userID, MIN(reqDate) AS first_buy\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n  GROUP BY 1\n)\nSELECT search_days_before_buy, COUNT(*) AS users\nFROM (\n  SELECT fb.userID, COUNT(DISTINCT s.search_date) AS search_days_before_buy\n  FROM first_buy fb\n  JOIN search_air s ON s.user_id = fb.userID AND s.activity_time < fb.first_buy\n  GROUP BY 1\n) t\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "first_buy",
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_36": {
+      "concepts": [
+        "% userID giai đoạn T12/2024–T1/2025 xuất hiện lại T12/2025–T2/2026, payment_air"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #36. Make clear: định nghĩa window 2 mùa (đề xuất theo coverage: T12/2024–T1/2025 vs T12/2025–T2/2026)? \"Quay lại\" = có ≥1 transaction Air, không phân biệt route/hãng? Spec: % userID giai đoạn T12/2024–T1/2025 xuất hiện lại T12/2025–T2/2026, payment_air Note: tận dụng đúng 2 giai đoạn coverage — view YoY retention đáng làm nhất",
+      "id": "qex_zlp_air_view_36",
+      "owner": "Zalopay OTA",
+      "question": "Khách mua Tết 2025 có quay lại mua Tết 2026 không?",
+      "sql": "WITH tet25 AS (\n  SELECT DISTINCT userID FROM payment_air\n  WHERE reqDate >= DATE '2024-12-01' AND reqDate < DATE '2025-02-01'\n),\ntet26 AS (\n  SELECT DISTINCT userID FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n)\nSELECT (SELECT COUNT(*) FROM tet25)            AS buyers_tet25,\n       (SELECT COUNT(*) FROM tet26)            AS buyers_tet26,\n       COUNT(*)                                AS retained,\n       ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM tet25), 2) AS retention_pct\nFROM tet25 t25 JOIN tet26 t26 ON t26.userID = t25.userID;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "tet25",
+        "tet26"
+      ]
+    },
+    "qex_zlp_air_view_37": {
+      "concepts": [
+        "phân phối số transaction per userID, range reqDate"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #37. Spec: phân phối số transaction per userID, range reqDate Note: 20.1K trans / 12.4K user → có lớp repeat đáng kể",
+      "id": "qex_zlp_air_view_37",
+      "owner": "Zalopay OTA",
+      "question": "Trong mùa này, bao nhiêu khách mua ≥2 lần?",
+      "sql": "SELECT CASE WHEN txn = 1 THEN '1 lần' WHEN txn = 2 THEN '2 lần' ELSE '3+ lần' END AS buy_freq,\n       COUNT(*) AS users,\n       ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct\nFROM (\n  SELECT userID, COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n) t\nGROUP BY 1 ORDER BY MIN(txn);",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_38": {
+      "concepts": [
+        "% buyer tháng M có mua tháng M+1, grain monthly",
+        "RR"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #38. Make clear: RR period đã chốt là M→M? Chỉ chạy được trên giai đoạn liên tục T12/2025–T2/2026 (2 cặp tháng). Đọc trong-Air only. Spec: % buyer tháng M có mua tháng M+1, grain monthly Note: RR trong-Air, không phải RR ZLP; chỉ chạy được trong giai đoạn liên tục T12/2025–T2/2026",
+      "id": "qex_zlp_air_view_38",
+      "owner": "Zalopay OTA",
+      "question": "RR tháng→tháng của buyer Air?",
+      "sql": "WITH monthly AS (\n  SELECT DISTINCT date_trunc('month', reqDate) AS ym, userID\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n)\nSELECT m0.ym,\n       COUNT(DISTINCT m0.userID) AS buyers_m0,\n       COUNT(DISTINCT m1.userID) AS retained_m1,\n       ROUND(100.0 * COUNT(DISTINCT m1.userID) / COUNT(DISTINCT m0.userID), 2) AS rr_pct\nFROM monthly m0\nLEFT JOIN monthly m1\n  ON m1.userID = m0.userID AND m1.ym = m0.ym + INTERVAL '1' MONTH\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "monthly"
+      ]
+    },
+    "qex_zlp_air_view_39": {
+      "concepts": [
+        "TPV / unique paying user, window = T12/2025–T2/2026 (khai báo rõ)",
+        "ARPPU"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #39. Make clear: window life-cycle = gì? (đề xuất: trọn mùa T12/2025–T2/2026). PHẢI ghi window vào header — ARPPU không có window là số vô nghĩa. Phân biệt với AOV (#19). Spec: TPV / unique paying user, window = T12/2025–T2/2026 (khai báo rõ) Note: ARPPU theo life-cycle window, khác AOV",
+      "id": "qex_zlp_air_view_39",
+      "owner": "Zalopay OTA",
+      "question": "1 khách Air mang về bao nhiêu trong mùa? (ARPPU)",
+      "sql": "SELECT CAST(SUM(amount) AS DOUBLE) / COUNT(DISTINCT userID) AS arppu,\n       SUM(amount)                          AS tpv,\n       COUNT(DISTINCT userID)               AS paying_user\nFROM payment_air\nWHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01';",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_40": {
+      "concepts": [
+        "decile/tier theo TPV per userID, kèm AOV & số đơn mỗi tier"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #40. Make clear: chia decile (10 tầng) hay tier nghiệp vụ (vd <2M / 2-5M / >5M)? Window nào? Spec: decile/tier theo TPV per userID, kèm AOV & số đơn mỗi tier Note: đầu vào CRM/priority segment",
+      "id": "qex_zlp_air_view_40",
+      "owner": "Zalopay OTA",
+      "question": "Phân tầng khách theo chi tiêu?",
+      "sql": "WITH per_user AS (\n  SELECT userID, SUM(amount) AS user_tpv, COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n),\nranked AS (SELECT *, NTILE(10) OVER (ORDER BY user_tpv) AS decile FROM per_user)\nSELECT decile,\n       COUNT(*)            AS users,\n       SUM(user_tpv)       AS tpv,\n       ROUND(100.0 * SUM(user_tpv) / SUM(SUM(user_tpv)) OVER (), 2) AS pct_tpv,\n       CAST(SUM(user_tpv) AS DOUBLE) / SUM(txn) AS aov_in_tier\nFROM ranked GROUP BY 1 ORDER BY 1 DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "per_user",
+        "ranked"
+      ]
+    },
+    "qex_zlp_air_view_41": {
+      "concepts": [
+        "so booking_window, AOV, route mix giữa nhóm 1-lần vs ≥2-lần"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #41. Make clear: so những chiều nào (đề xuất: AOV, median booking_window, % RoundTrip, % INTL)? Cùng window. Spec: so booking_window, AOV, route mix giữa nhóm 1-lần vs ≥2-lần Note: cohort behavioral comparison",
+      "id": "qex_zlp_air_view_41",
+      "owner": "Zalopay OTA",
+      "question": "Khách mua lặp có hành vi khác khách mua 1 lần?",
+      "sql": "WITH per_user AS (\n  SELECT userID, COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n)\nSELECT CASE WHEN u.txn = 1 THEN 'one-time' ELSE 'repeat' END AS segment,\n       COUNT(DISTINCT p.userID)            AS users,\n       COUNT(p.transID)                    AS txn,\n       CAST(SUM(p.amount) AS DOUBLE) / COUNT(p.transID) AS aov,\n       approx_percentile(p.booking_window, 0.5) AS median_bw,\n       ROUND(100.0 * SUM(CASE WHEN UPPER(p.round_type) = 'ROUNDTRIP' THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_roundtrip,\n       ROUND(100.0 * SUM(CASE WHEN p.flight_type = 'INTERNATIONAL' THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_intl\nFROM payment_air p\nJOIN per_user u ON u.userID = p.userID\nWHERE p.reqDate >= DATE '{{ from_date }}' AND p.reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "per_user"
+      ]
+    },
+    "qex_zlp_air_view_42": {
+      "concepts": [
+        "COUNT userID có transaction đầu tiên trong tuần, theo week(reqDate)"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #42. Make clear: \"mới\" = transaction đầu tiên trong data Air kỳ này (caveat Level 4). Tuần bắt đầu thứ 2? Spec: COUNT userID có transaction đầu tiên trong tuần, theo week(reqDate) Note: \"mới\" = trong phạm vi data Air, KHÔNG phải NPU/FPU chuẩn",
+      "id": "qex_zlp_air_view_42",
+      "owner": "Zalopay OTA",
+      "question": "Buyer mới mỗi tuần (first-time trong data) trend ra sao?",
+      "sql": "WITH first_buy AS (\n  SELECT userID, MIN(reqDate) AS first_buy\n  FROM payment_air\n  GROUP BY 1\n)\nSELECT date_trunc('week', first_buy) AS wk,\n       COUNT(*) AS new_buyers\nFROM first_buy\nWHERE first_buy >= DATE '2025-12-01' AND first_buy < DATE '2026-03-01'\nGROUP BY 1 ORDER BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "first_buy"
+      ]
+    },
+    "qex_zlp_air_view_43": {
+      "concepts": [
+        "% change transaction & TPV",
+        "date(reqDate)",
+        "D vs D-1; M vs M-1"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #43. Make clear: grain daily (D vs D-1) hay monthly (M vs M-1)? So transaction, TPV hay cả 2? Note: growth snapshot",
+      "id": "qex_zlp_air_view_43",
+      "owner": "Zalopay OTA",
+      "question": "Hôm nay/tháng này so hôm qua/tháng trước tăng giảm bao nhiêu %? (E4, E5, E10)",
+      "sql": "WITH daily AS (\n  SELECT date(reqDate) AS d,                  -- monthly: date_trunc('month', reqDate)\n         COUNT(transID) AS txn, SUM(amount) AS tpv\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n)\nSELECT d, txn, tpv,\n       ROUND(100.0 * (txn - LAG(txn) OVER (ORDER BY d)) / LAG(txn) OVER (ORDER BY d), 2) AS txn_chg_pct,\n       ROUND(100.0 * (tpv - LAG(tpv) OVER (ORDER BY d)) / LAG(tpv) OVER (ORDER BY d), 2) AS tpv_chg_pct\nFROM daily ORDER BY d;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "daily"
+      ]
+    },
+    "qex_zlp_air_view_44": {
+      "concepts": [
+        "transaction + TPV, top 3 / bottom 3",
+        "range reqDate",
+        "hãng"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #44. Make clear: rank theo transaction hay TPV? \"Hãng\" = appID, phần EnViet không tách được — khai báo. Note: ⚠ EnViet third party gom nhiều hãng — chốt grain hãng vs appUser với biz",
+      "id": "qex_zlp_air_view_44",
+      "owner": "Zalopay OTA",
+      "question": "Rank hãng theo doanh số: top/bottom, ai có nguy cơ bị loại? (E11–15, E18)",
+      "sql": "SELECT appID,\n       COUNT(transID) AS txn, SUM(amount) AS tpv,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (), 2) AS pct_txn,\n       ROUND(100.0 * SUM(amount)    / SUM(SUM(amount))    OVER (), 2) AS pct_tpv\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY txn DESC;       -- top đọc từ đầu, bottom/at-risk đọc từ cuối",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_45": {
+      "concepts": [
+        "% TPV",
+        "range reqDate",
+        "UPPER(round_type)",
+        "TPV"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #45. Make clear: #17 là % transaction — đây là % TPV, 2 số khác nhau (AOV RoundTrip ~2x). Note: gốc #17 mới có % transaction",
+      "id": "qex_zlp_air_view_45",
+      "owner": "Zalopay OTA",
+      "question": "Khứ hồi chiếm bao nhiêu % TPV? (E22)",
+      "sql": "SELECT CASE UPPER(round_type) WHEN 'ONEWAY' THEN 'OneWay' ELSE 'RoundTrip' END AS round_type_norm,\n       SUM(amount) AS tpv,\n       ROUND(100.0 * SUM(amount) / SUM(SUM(amount)) OVER (), 2) AS pct_tpv\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_46": {
+      "concepts": [
+        "transaction",
+        "range reqDate",
+        "flight_type × UPPER(round_type)",
+        "DOM",
+        "INTL"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #46. Make clear: % tính trong từng flight_type hay trên tổng? Note: —",
+      "id": "qex_zlp_air_view_46",
+      "owner": "Zalopay OTA",
+      "question": "DOM/INTL × 1 chiều/khứ hồi — combo nào bán nhiều nhất? (E23–24)",
+      "sql": "SELECT flight_type,\n       CASE UPPER(round_type) WHEN 'ONEWAY' THEN 'OneWay' ELSE 'RoundTrip' END AS round_type_norm,\n       COUNT(transID) AS txn,\n       ROUND(100.0 * COUNT(transID) / SUM(COUNT(transID)) OVER (PARTITION BY flight_type), 2) AS pct_in_market\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1, 2 ORDER BY 1, 3 DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_47": {
+      "concepts": [
+        "transaction",
+        "range reqDate",
+        "origin"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #47. Make clear: theo airport hay city (→ #27)? Top N? Note: gốc #7 mới có top dest",
+      "id": "qex_zlp_air_view_47",
+      "owner": "Zalopay OTA",
+      "question": "Điểm khởi hành nào có khách mua nhiều nhất? (E42)",
+      "sql": "SELECT origin, COUNT(transID) AS txn, COUNT(DISTINCT userID) AS paying_user\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 2 DESC LIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_48": {
+      "concepts": [
+        "TPV per userID, top N",
+        "range reqDate",
+        "userID"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #48. Make clear: top N? Output cho mục đích gì (CRM cần thêm cột gì)? Window = coverage, khai báo. Note: VIP list; chốt N với biz",
+      "id": "qex_zlp_air_view_48",
+      "owner": "Zalopay OTA",
+      "question": "Top khách chi tiêu nhiều nhất? (E35)",
+      "sql": "SELECT userID, SUM(amount) AS user_tpv, COUNT(transID) AS txn,\n       CAST(SUM(amount) AS DOUBLE) / COUNT(transID) AS aov\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY 2 DESC LIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_49": {
+      "concepts": [
+        "% MoM transaction & TPV, grain hãng / route / provider"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #49. Make clear: dimension nào (appID / route / appUser)? Growth theo transaction hay TPV? Chỉ có 3 tháng liên tục (T12/2025–T2/2026) → tối đa 2 cặp MoM. Spec: % MoM transaction & TPV, grain hãng / route / provider Note: momentum + at-risk; caveat EnViet khi grain = hãng",
+      "id": "qex_zlp_air_view_49",
+      "owner": "Zalopay OTA",
+      "question": "Hãng / route / provider nào tăng trưởng nhanh nhất hoặc giảm mạnh nhất MoM? (E17, E50, E57–58, E87)",
+      "sql": "WITH m AS (\n  SELECT appID AS dim,                        -- đổi: route / appUser\n         date_trunc('month', reqDate) AS ym,\n         COUNT(transID) AS txn, SUM(amount) AS tpv\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n  GROUP BY 1, 2\n)\nSELECT dim, ym, txn, tpv,\n       ROUND(100.0 * (tpv - LAG(tpv) OVER (PARTITION BY dim ORDER BY ym))\n                   / LAG(tpv) OVER (PARTITION BY dim ORDER BY ym), 2) AS tpv_mom_pct\nFROM m ORDER BY ym, tpv_mom_pct DESC NULLS LAST;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "m"
+      ]
+    },
+    "qex_zlp_air_view_50": {
+      "concepts": [
+        "transaction bottom 3, by route"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #50. Make clear: bottom theo transaction tuyệt đối hay theo CR (→ #30)? Loại route quá ít data? Spec: transaction bottom 3, by route Note: underperformer",
+      "id": "qex_zlp_air_view_50",
+      "owner": "Zalopay OTA",
+      "question": "Tuyến nào bán chậm nhất, có cơ hội tăng không? (E43)",
+      "sql": "SELECT route, COUNT(transID) AS txn, SUM(amount) AS tpv\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 HAVING COUNT(transID) >= {{ min_txn }}     -- vd 10, tránh đuôi route 1-2 đơn\nORDER BY 2 ASC LIMIT {{ bottom_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_51": {
+      "concepts": [
+        "% TPV concentration, top 10 route / top 3 provider / top 5 hãng"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #51. Make clear: dimension + N (mặc định: top 10 route / top 3 appUser / top 5 appID)? Theo TPV hay transaction? Spec: % TPV concentration, top 10 route / top 3 provider / top 5 hãng Note: dependency risk",
+      "id": "qex_zlp_air_view_51",
+      "owner": "Zalopay OTA",
+      "question": "Bao nhiêu % doanh số từ top N tuyến / kênh / hãng? (E45, E60, E89)",
+      "sql": "WITH agg AS (\n  SELECT route AS dim, SUM(amount) AS tpv    -- đổi: appUser / appID\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n),\nranked AS (SELECT *, ROW_NUMBER() OVER (ORDER BY tpv DESC) AS rk FROM agg)\nSELECT SUM(CASE WHEN rk <= {{ top_n }} THEN tpv END) AS tpv_top_n,\n       SUM(tpv) AS tpv_total,\n       ROUND(100.0 * SUM(CASE WHEN rk <= {{ top_n }} THEN tpv END) / SUM(tpv), 2) AS pct_top_n\nFROM ranked;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "agg",
+        "ranked"
+      ]
+    },
+    "qex_zlp_air_view_52": {
+      "concepts": [
+        "% TPV theo booking_window_group"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #52. Make clear: #18 là % transaction — đây là % TPV. Bucket chuẩn hay cắt 2 nhóm thô (>30d / <7d)? Spec: % TPV theo booking_window_group Note: gốc #18 mới có % transaction",
+      "id": "qex_zlp_air_view_52",
+      "owner": "Zalopay OTA",
+      "question": "Khách đặt sớm (>30d) vs sát ngày (<7d) chiếm bao nhiêu % doanh số? (E61–62)",
+      "sql": "SELECT booking_window_group,\n       SUM(amount) AS tpv,\n       ROUND(100.0 * SUM(amount) / SUM(SUM(amount)) OVER (), 2) AS pct_tpv\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1\nORDER BY CASE booking_window_group WHEN 'Same day' THEN 0 WHEN '1-3 days' THEN 1 WHEN '4-7 days' THEN 2\n  WHEN '8-14 days' THEN 3 WHEN '15-30 days' THEN 4 WHEN '31-60 days' THEN 5 WHEN '>60 days' THEN 6 END;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_53": {
+      "concepts": [
+        "% user ≥2 transaction, by booking_window_group"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #53. Make clear: user có nhiều đơn nhiều bucket → gán theo bucket của đơn đầu tiên (chốt với biz). Spec: % user ≥2 transaction, by booking_window_group Note: loyalty by segment",
+      "id": "qex_zlp_air_view_53",
+      "owner": "Zalopay OTA",
+      "question": "Nhóm booking window nào có repeat rate cao hơn? (E63)",
+      "sql": "WITH per_user AS (\n  SELECT userID,\n         MIN_BY(booking_window_group, reqDate) AS first_bucket,\n         COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n)\nSELECT first_bucket,\n       COUNT(*) AS users,\n       ROUND(100.0 * SUM(CASE WHEN txn >= 2 THEN 1 ELSE 0 END) / COUNT(*), 2) AS repeat_pct\nFROM per_user GROUP BY 1\nORDER BY CASE first_bucket WHEN 'Same day' THEN 0 WHEN '1-3 days' THEN 1 WHEN '4-7 days' THEN 2\n  WHEN '8-14 days' THEN 3 WHEN '15-30 days' THEN 4 WHEN '31-60 days' THEN 5 WHEN '>60 days' THEN 6 END;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "per_user"
+      ]
+    },
+    "qex_zlp_air_view_54": {
+      "concepts": [
+        "% repeat user, by provider"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #54. Make clear: gán user theo kênh của đơn đầu (như #53). Repeat = ≥2 đơn bất kỳ kênh, hay ≥2 đơn cùng kênh? Spec: % repeat user, by provider Note: loyalty by channel",
+      "id": "qex_zlp_air_view_54",
+      "owner": "Zalopay OTA",
+      "question": "Kênh nào có repeat rate cao nhất? (E55)",
+      "sql": "WITH per_user AS (\n  SELECT userID,\n         MIN_BY(appUser, reqDate) AS first_channel,\n         COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n)\nSELECT first_channel, COUNT(*) AS users,\n       ROUND(100.0 * SUM(CASE WHEN txn >= 2 THEN 1 ELSE 0 END) / COUNT(*), 2) AS repeat_pct\nFROM per_user GROUP BY 1 ORDER BY users DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "per_user"
+      ]
+    },
+    "qex_zlp_air_view_55": {
+      "concepts": [
+        "TPV per user, by provider"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #55. Make clear: \"CLV\" ở đây = TPV trong coverage — khai báo window, không phải lifetime thật. Spec: TPV per user, by provider Note: khai báo window = coverage",
+      "id": "qex_zlp_air_view_55",
+      "owner": "Zalopay OTA",
+      "question": "Khách kênh nào chi tiêu nhiều nhất? (E59)",
+      "sql": "SELECT appUser,\n       COUNT(DISTINCT userID) AS users, SUM(amount) AS tpv,\n       CAST(SUM(amount) AS DOUBLE) / COUNT(DISTINCT userID) AS tpv_per_user\nFROM payment_air\nWHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY tpv_per_user DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_56": {
+      "concepts": [
+        "% MoM growth, by flight_type",
+        "DOM",
+        "INTL"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #56. Spec: % MoM growth, by flight_type Note: market momentum",
+      "id": "qex_zlp_air_view_56",
+      "owner": "Zalopay OTA",
+      "question": "DOM hay INTL tăng nhanh hơn? (E75)",
+      "sql": "-- No standalone SQL template in playbook for view #56.\n-- Guidance: Dùng template #49 với dim = flight_type. Bẫy: INTL chỉ ~3% volume → % growth dao động mạnh, đưa kèm số tuyệt đối.",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": []
+    },
+    "qex_zlp_air_view_57": {
+      "concepts": [
+        "transaction + TPV monthly"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #57. Spec: transaction + TPV monthly Note: ⚠ mùa Tết — đọc trend phải tách seasonality",
+      "id": "qex_zlp_air_view_57",
+      "owner": "Zalopay OTA",
+      "question": "Trend doanh số 3 tháng T12/2025–T2/2026? (E71)",
+      "sql": "-- No standalone SQL template in playbook for view #57.\n-- Guidance: Dùng template #11 grain monthly (txn + TPV). Bắt buộc nói: 3 tháng này là trọn mùa Tết — trend tăng/giảm phản ánh seasonality, không phải trajectory business; muốn nói growth phải so YoY (#22). --- # LEVEL 3 — Join 2 bảng (demand ↔ thực mua) Make clear chung cho cả Level 3 — 3 điều BẮT BUỘC chốt trước khi xuất query: 1. Match window: mua trong vòng bao nhiêu ngày sau search thì tính là \"converted\"? (mặc định đề xuất 7 ngày — phải khai báo trong header). 2. Match grain: cùng user là đủ, hay phải cùng user + cùng route? Số khác nhau rất xa. 3. Range: chỉ chạy trên giai đoạn trùng coverage 2025-12-01 → 2026-02-28. Payment T12/2024–T1/2025 KHÔNG có search → đưa vào là sai. Và câu khai báo bắt buộc khi trả kết quả: *\"Đây là conversion user-level qua join search↔payment, KHÔNG phải CR session chuẩn (không có tracking_session_id).\"*",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search"
+      ]
+    },
+    "qex_zlp_air_view_58": {
+      "concepts": [
+        "% cross-market buyer, match user_id, window 7 ngày"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #58. Make clear: search_air không có flight_type → phân loại search DOM bằng list sân bay VN (chốt list với biz, như city_map #27). Window match? Hay chỉ cần overlap trong kỳ? Spec: % cross-market buyer, match user_id, window 7 ngày Note: cần map airport→DOM/INTL cho search trước",
+      "id": "qex_zlp_air_view_58",
+      "owner": "Zalopay OTA",
+      "question": "Khách search nội địa có mua quốc tế không? (E79)",
+      "sql": "WITH vn_airports AS (\n  SELECT code FROM (VALUES ('SGN'),('HAN'),('DAD'),('CXR'),('PQC'),('VCA'),('HUI'),('VII'),('UIH')\n    -- bổ sung đủ list sân bay VN trước khi chạy thật\n  ) AS t(code)\n),\ndom_search AS (\n  SELECT user_id, MIN(activity_time) AS first_dom_search\n  FROM search_air\n  WHERE search_date BETWEEN DATE '2025-12-01' AND DATE '2026-02-28'\n    AND origin IN (SELECT code FROM vn_airports)\n    AND dest   IN (SELECT code FROM vn_airports)\n  GROUP BY 1\n)\nSELECT COUNT(*) AS dom_searchers,\n       COUNT(DISTINCT p.userID) AS bought_intl,\n       ROUND(100.0 * COUNT(DISTINCT p.userID) / COUNT(*), 2) AS pct_cross\nFROM dom_search d\nLEFT JOIN payment_air p\n  ON p.userID = d.user_id\n AND p.flight_type = 'INTERNATIONAL'\n AND p.reqDate >= d.first_dom_search\n AND p.reqDate <  d.first_dom_search + INTERVAL '{{ window_days }}' DAY;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "search_air",
+        "vn_airports",
+        "dom_search",
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_59": {
+      "concepts": [
+        "% buyer 1-đơn có search route ≠ route đã mua, sau ngày mua, window 7 ngày"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #59. Make clear: khai báo là proxy intent, không phải nhu cầu chắc chắn. Route \"khác\" có gộp chiều ngược không (như #32)? Spec: % buyer 1-đơn có search route ≠ route đã mua, sau ngày mua, window 7 ngày Note: proxy intent — khai báo là proxy",
+      "id": "qex_zlp_air_view_59",
+      "owner": "Zalopay OTA",
+      "question": "Buyer 1 lần có search route khác sau khi mua không? (cross-sell proxy) (E95)",
+      "sql": "WITH one_buyers AS (\n  SELECT userID, MIN(route) AS bought_route, MIN(reqDate) AS buy_time\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n  GROUP BY 1 HAVING COUNT(transID) = 1\n)\nSELECT (SELECT COUNT(*) FROM one_buyers) AS one_time_buyers,\n       COUNT(DISTINCT b.userID)          AS searched_other_route,\n       ROUND(100.0 * COUNT(DISTINCT b.userID) / (SELECT COUNT(*) FROM one_buyers), 2) AS pct_cross_sell\nFROM one_buyers b\nJOIN search_air s\n  ON s.user_id = b.userID\n AND s.activity_time >  b.buy_time\n AND s.activity_time <  b.buy_time + INTERVAL '{{ window_days }}' DAY\n AND s.route <> b.bought_route;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "one_buyers",
+        "search_air"
+      ]
+    },
+    "qex_zlp_air_view_60": {
+      "concepts": [
+        "repeat rate decile 1 vs overall, TPV per userID",
+        "VIP"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #60. Make clear: VIP = decile 1 theo TPV trong window? So repeat rate (≥2 đơn) VIP vs phần còn lại. Spec: repeat rate decile 1 vs overall, TPV per userID Note: tiering impact",
+      "id": "qex_zlp_air_view_60",
+      "owner": "Zalopay OTA",
+      "question": "Khách VIP (top 10% spend) có repeat rate cao hơn trung bình bao nhiêu? (E68, E81)",
+      "sql": "WITH per_user AS (\n  SELECT userID, SUM(amount) AS user_tpv, COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n),\nranked AS (SELECT *, NTILE(10) OVER (ORDER BY user_tpv DESC) AS decile FROM per_user)\nSELECT CASE WHEN decile = 1 THEN 'VIP top 10%' ELSE 'Others' END AS segment,\n       COUNT(*) AS users,\n       ROUND(100.0 * SUM(CASE WHEN txn >= 2 THEN 1 ELSE 0 END) / COUNT(*), 2) AS repeat_pct\nFROM ranked GROUP BY 1;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "per_user",
+        "ranked"
+      ]
+    },
+    "qex_zlp_air_view_61": {
+      "concepts": [
+        "% userID có ≥2 hãng distinct"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #61. Make clear: ⚠ EnViet gom nhiều hãng → \"multi-airline\" bị méo (1 appID nhưng nhiều hãng thật). Khai báo grain = appID. Spec: % userID có ≥2 hãng distinct Note: ⚠ EnViet gom nhiều hãng → số bị méo, chốt grain trước",
+      "id": "qex_zlp_air_view_61",
+      "owner": "Zalopay OTA",
+      "question": "Bao nhiêu % buyer mua từ ≥2 hãng? (E78)",
+      "sql": "SELECT COUNT(*) AS buyers,\n       SUM(CASE WHEN n_app >= 2 THEN 1 ELSE 0 END) AS multi_airline,\n       ROUND(100.0 * SUM(CASE WHEN n_app >= 2 THEN 1 ELSE 0 END) / COUNT(*), 2) AS pct_multi\nFROM (\n  SELECT userID, COUNT(DISTINCT appID) AS n_app\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n) t;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    },
+    "qex_zlp_air_view_62": {
+      "concepts": [
+        "% userID có ≥2 provider distinct"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #62. Spec: % userID có ≥2 provider distinct Note: channel loyalty",
+      "id": "qex_zlp_air_view_62",
+      "owner": "Zalopay OTA",
+      "question": "Bao nhiêu % buyer mua từ ≥2 kênh/provider? (E82)",
+      "sql": "-- No standalone SQL template in playbook for view #62.\n-- Guidance: Template #61, thay appID → appUser.",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": []
+    },
+    "qex_zlp_air_view_63": {
+      "concepts": [
+        "median gap đơn 1 → đơn 2, per userID"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #63. Make clear: coverage ~3 tháng → gap bị right-censored (khách sẽ mua lần 2 sau khi hết data không thấy được) — median là cận dưới, phải khai báo. Spec: median gap đơn 1 → đơn 2, per userID Note: coverage ~3 tháng → right-censored, khai báo rõ",
+      "id": "qex_zlp_air_view_63",
+      "owner": "Zalopay OTA",
+      "question": "Khách quay lại bao lâu mới mua lần 2? (E80)",
+      "sql": "WITH ordered AS (\n  SELECT userID, reqDate,\n         ROW_NUMBER() OVER (PARTITION BY userID ORDER BY reqDate) AS rn\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n)\nSELECT COUNT(*) AS repeat_users,\n       approx_percentile(gap_days, 0.5)  AS median_gap_days,\n       approx_percentile(gap_days, 0.75) AS p75_gap_days\nFROM (\n  SELECT o1.userID, date_diff('day', o1.reqDate, o2.reqDate) AS gap_days\n  FROM ordered o1\n  JOIN ordered o2 ON o2.userID = o1.userID AND o1.rn = 1 AND o2.rn = 2\n) t;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "ordered"
+      ]
+    },
+    "qex_zlp_air_view_64": {
+      "concepts": [
+        "% TPV từ buyer ≥2 đơn, by top route"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #64. Make clear: repeat = ≥2 đơn toàn Air (mặc định) hay ≥2 đơn cùng route? Spec: % TPV từ buyer ≥2 đơn, by top route Note: route quality",
+      "id": "qex_zlp_air_view_64",
+      "owner": "Zalopay OTA",
+      "question": "Top tuyến: bao nhiêu % doanh số từ khách repeat? (E84)",
+      "sql": "WITH per_user AS (\n  SELECT userID, COUNT(transID) AS txn\n  FROM payment_air\n  WHERE reqDate >= DATE '{{ from_date }}' AND reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\n  GROUP BY 1\n)\nSELECT p.route,\n       SUM(p.amount) AS tpv,\n       ROUND(100.0 * SUM(CASE WHEN u.txn >= 2 THEN p.amount ELSE 0 END) / SUM(p.amount), 2) AS pct_tpv_repeat\nFROM payment_air p\nJOIN per_user u ON u.userID = p.userID\nWHERE p.reqDate >= DATE '{{ from_date }}' AND p.reqDate < DATE '{{ to_date }}' + INTERVAL '1' DAY\nGROUP BY 1 ORDER BY tpv DESC LIMIT {{ top_n }};",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "per_user"
+      ]
+    },
+    "qex_zlp_air_view_65": {
+      "concepts": [
+        "rank segment theo TPV/user × % MoM growth"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #65. Make clear: segment theo chiều nào (booking_window_group / flight_type / route / appUser)? Ranking = TPV/user × avg MoM growth là công thức thô — kết quả là bảng xếp hạng để đọc cùng biz, không phải câu trả lời chiến lược. Spec: rank segment theo TPV/user × % MoM growth Note: data ra ranking; \"chiến lược\" đọc cùng biz",
+      "id": "qex_zlp_air_view_65",
+      "owner": "Zalopay OTA",
+      "question": "Segment nào nên là target chính? (E99)",
+      "sql": "WITH base AS (\n  SELECT booking_window_group AS seg,         -- đổi dimension theo chốt với biz\n         date_trunc('month', reqDate) AS ym,\n         SUM(amount) AS tpv\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n  GROUP BY 1, 2\n),\ngrowth AS (\n  SELECT seg, AVG(mom_pct) AS avg_mom_pct\n  FROM (\n    SELECT seg, ym,\n           100.0 * (tpv - LAG(tpv) OVER (PARTITION BY seg ORDER BY ym))\n                 / LAG(tpv) OVER (PARTITION BY seg ORDER BY ym) AS mom_pct\n    FROM base\n  ) t GROUP BY 1\n),\nval AS (\n  SELECT booking_window_group AS seg,\n         CAST(SUM(amount) AS DOUBLE) / COUNT(DISTINCT userID) AS tpv_per_user\n  FROM payment_air\n  WHERE reqDate >= DATE '2025-12-01' AND reqDate < DATE '2026-03-01'\n  GROUP BY 1\n)\nSELECT v.seg, v.tpv_per_user, g.avg_mom_pct\nFROM val v LEFT JOIN growth g ON g.seg = v.seg\nORDER BY v.tpv_per_user DESC;",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air",
+        "base",
+        "val",
+        "growth"
+      ]
+    },
+    "qex_zlp_air_view_66": {
+      "concepts": [
+        "số học từ các view sẵn: AOV repeat × X; TPV share × 10%; size segment <7d; searcher pool × CR × AOV"
+      ],
+      "created_at": "2026-06-12T08:23:28.376693+00:00",
+      "explanation": "View #66. Spec: số học từ các view sẵn: AOV repeat × X; TPV share × 10%; size segment <7d; searcher pool × CR × AOV Note: ước lượng trần/thô, KHÔNG phải forecast",
+      "id": "qex_zlp_air_view_66",
+      "owner": "Zalopay OTA",
+      "question": "Scenario/sizing: thêm X khách repeat, top route giảm 10%, tối ưu last-minute, invest tuyến X? (E85, E88, E90, E93)",
+      "sql": "-- No standalone SQL template in playbook for view #66.\n-- Guidance: Số học từ view sẵn, ghi rõ là ước lượng trần/thô, không phải forecast: - E85 thêm X khách repeat → doanh số tăng ≈ X × AOV nhóm repeat (lấy AOV repeat từ #41). - E88 sizing last-minute: SELECT COUNT(transID), SUM(amount) FROM payment_air WHERE booking_window < 7 AND <range reqDate>; — \"tối ưu được bao nhiêu\" là giả định biz, data chỉ size segment. - E90 top route giảm 10% → tác động ≈ 10% × pct_share route (share từ #14). - E93 invest tuyến X → trần ≈ (searcher − buyer của route) × CR hiện tại × AOV route (lấy từ #30 + #19). --- ## Header khai báo — đính kèm mọi câu SQL xuất ra (dạng comment đầu query) `` Metric: <tên + định nghĩa ngắn, theo ref_zlp_metric_definitions> Đơn vị đếm: <transaction / unique user / TPV / lượt search> Thời gian: <range> theo cột <reqDate / search_date / flight_date / departure_date> Grain: <route tách chiều / city-pair / user / ...> Filter: <domestic only, provider, ...> Match rule (nếu join): <window X ngày, cùng user / cùng user+route, anchor first_search> Assumption: <những gì chưa hỏi được biz và đã tự chọn> ` Rule cuối: khi Trang chạy SQL mà số/lỗi \"bất thường\" → soát lại query theo thứ tự: (1) literal ngày thiếu DATE '...'` (lỗi varchar), (2) đơn vị đếm, (3) cột thời gian, (4) quên UPPER(round_type), (5) lẫn giai đoạn T12/2024–T1/2025 vào query join, (6) quên loại Unknown, (7) chia nguyên thiếu CAST AS DOUBLE.",
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.376693+00:00",
+      "used_tables": [
+        "payment_air"
+      ]
+    }
+  },
+  "schema_version": 1
+}

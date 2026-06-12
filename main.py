@@ -19,6 +19,7 @@ def build_help() -> dict[str, Any]:
         "agent": "business-knowledge-learning-agent",
         "purpose": "Thu thập, parse, review, và chuẩn hóa knowledge nghiệp vụ từ stakeholder và file text.",
         "actions": {
+            "chat": "Entry chính cho hỏi đáp freeform. Fields: message, user_id, session_id.",
             "start_teach_session": "Bắt đầu Flow A teaching nhiều lượt. Fields: message, stakeholder, team, domain, owner.",
             "append_teach_message": "Thêm message vào teaching session. Fields: session_id, message.",
             "summarize_teach_session": "Tóm tắt draft knowledge để user confirm. Fields: session_id.",
@@ -27,6 +28,13 @@ def build_help() -> dict[str, Any]:
             "review_candidate": "Approve/reject pending change. Fields: candidate_id, decision, updates.",
             "list_candidates": "Liệt kê candidate theo status. Fields: status.",
             "search_knowledge": "Tìm approved knowledge, dùng LLM rerank nếu được cấu hình. Fields: query.",
+            "ask_data_question": "Hỏi câu hỏi data; agent trả needs_dictionary/needs_knowledge/sql_draft. Fields: question.",
+            "add_data_dictionary": "Thêm mapping bảng/cột đã approved. Fields: table, description, columns, relationships, owner, status.",
+            "search_data_dictionary": "Tìm mapping bảng/cột theo table, column, alias, business meaning. Fields: query.",
+            "list_data_dictionary": "Liệt kê data dictionary đã lưu.",
+            "add_question_example": "Thêm SQL mẫu đã approved. Fields: question, sql, explanation, concepts, used_tables, owner, status.",
+            "search_question_examples": "Tìm SQL mẫu theo question/concepts/tables. Fields: query.",
+            "list_question_examples": "Liệt kê question examples đã lưu.",
             "storage_status": "Kiểm tra agent đang dùng JSON local hay Postgres/Supabase.",
             "analyze_text": "Phân tích text dựa trên approved/pending/conflict knowledge. Fields: text.",
             "ingest_document": "Ingest nội dung file dạng text. Fields: text, title, stakeholder, team, domain, owner.",
@@ -54,11 +62,20 @@ def build_analyze_answer(result: dict[str, Any]) -> str:
 
 @app.entrypoint
 def handler(payload: dict, context: RequestContext) -> dict:
-    action = str(payload.get("action") or "help").strip().lower()
+    action = str(payload.get("action") or ("chat" if payload.get("message") or payload.get("question") else "help")).strip().lower()
 
     try:
         if action == "help":
             result = build_help()
+        elif action == "chat":
+            result = store.chat(
+                message=str(payload.get("message") or payload.get("question") or ""),
+                user_id=str(payload.get("user_id") or context.user_id or ""),
+                session_id=str(payload.get("session_id") or context.session_id or ""),
+                pending_action_id=str(payload.get("pending_action_id") or ""),
+                debug_context=bool(payload.get("debug_context")),
+                use_runtime_skills=payload.get("use_runtime_skills"),
+            )
         elif action == "teach_text":
             result = store.teach_text(
                 text=str(payload.get("text") or payload.get("message") or ""),
@@ -117,6 +134,53 @@ def handler(payload: dict, context: RequestContext) -> dict:
         elif action == "search_knowledge":
             result = {
                 "knowledge": store.search_knowledge(query=str(payload.get("query") or "")),
+            }
+        elif action == "ask_data_question":
+            result = store.ask_data_question(question=str(payload.get("question") or payload.get("message") or ""))
+        elif action == "add_data_dictionary":
+            columns = payload.get("columns")
+            relationships = payload.get("relationships")
+            result = {
+                "data_dictionary": store.add_data_dictionary(
+                    table=str(payload.get("table") or ""),
+                    description=str(payload.get("description") or ""),
+                    columns=columns if isinstance(columns, list) else [],
+                    relationships=relationships if isinstance(relationships, list) else [],
+                    owner=str(payload.get("owner") or ""),
+                    status=str(payload.get("status") or "approved"),
+                )
+            }
+            result["answer"] = f"Đã thêm data dictionary cho bảng {result['data_dictionary']['table']}."
+        elif action == "search_data_dictionary":
+            result = {
+                "data_dictionary": store.search_data_dictionary(query=str(payload.get("query") or "")),
+            }
+        elif action == "list_data_dictionary":
+            result = {
+                "data_dictionary": store.list_data_dictionary(),
+            }
+        elif action == "add_question_example":
+            concepts = payload.get("concepts")
+            used_tables = payload.get("used_tables")
+            result = {
+                "question_example": store.add_question_example(
+                    question=str(payload.get("question") or ""),
+                    sql=str(payload.get("sql") or ""),
+                    explanation=str(payload.get("explanation") or ""),
+                    concepts=concepts if isinstance(concepts, list) else [],
+                    used_tables=used_tables if isinstance(used_tables, list) else [],
+                    owner=str(payload.get("owner") or ""),
+                    status=str(payload.get("status") or "approved"),
+                )
+            }
+            result["answer"] = f"Đã thêm question example {result['question_example']['id']}."
+        elif action == "search_question_examples":
+            result = {
+                "question_examples": store.search_question_examples(query=str(payload.get("query") or "")),
+            }
+        elif action == "list_question_examples":
+            result = {
+                "question_examples": store.list_question_examples(),
             }
         elif action == "storage_status":
             result = store.storage_status()

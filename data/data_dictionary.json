@@ -1,0 +1,420 @@
+{
+  "records": {
+    "dict_zlp_air_payment_air": {
+      "columns": [
+        {
+          "aliases": [
+            "Mã định danh giao dịch",
+            "transID là unique",
+            "260202003801732"
+          ],
+          "business_meaning": "Mã định danh giao dịch. transID là unique. Khóa giao dịch — UNIQUE (= số dòng 20.129). Primary key.",
+          "data_type": "Integer (ID)",
+          "name": "transID"
+        },
+        {
+          "aliases": [
+            "Tên providers - nhà cung cấp vé trên Zalopay",
+            "Có thể hiểu là hãng, trừ trường hợp EnViet bao gồm Bamboo, Vietravel, Sun Phu Quoc Airways do 3 hãng này mình đi qua third party EnViet",
+            "612, 678, 3568, 69"
+          ],
+          "business_meaning": "Tên providers - nhà cung cấp vé trên Zalopay. Có thể hiểu là hãng, trừ trường hợp EnViet bao gồm Bamboo, Vietravel, Sun Phu Quoc Airways do 3 hãng này mình đi qua third party EnViet. Mã app/hãng theo cặp hãng × DOM/INTL: 612=Vietjet DOM, 678=Vietjet INTL, 3568=VNA DOM, 3569=VNA INTL, 4096=EnViet DOM, 4341=EnViet INTL, 606=Bamboo DOM, 677=Bamboo INTL, 69=Gotadi DOM, 2643=Gotadi INTL.",
+          "data_type": "Integer (cat)",
+          "name": "appID"
+        },
+        {
+          "aliases": [
+            "Giá trị đơn hàng",
+            "tổng lại sẽ có TPV",
+            "1413000 = 1.413.000đ"
+          ],
+          "business_meaning": "Giá trị đơn hàng. tổng lại sẽ có TPV. Giá trị giao dịch (VND). Range 592.000đ → 48.790.014đ.",
+          "data_type": "Integer (VND)",
+          "name": "amount"
+        },
+        {
+          "aliases": [
+            "Không cần hiểu, không dùng",
+            "260202_002207"
+          ],
+          "business_meaning": "Không cần hiểu, không dùng. Không cần hiểu, không dùng. Mã giao dịch phía app. Gần unique (15 trùng). Prefix YYMMDD ≈ ngày reqDate (~93%).",
+          "data_type": "Text (ID)",
+          "name": "appTransID"
+        },
+        {
+          "aliases": [
+            "Tên providers - tương ứng với appID",
+            "Có thể hiểu là hãng, trừ trường hợp EnViet bao gồm Bamboo, Vietravel, Sun Phu Quoc Airways do 3 hãng này mình đi qua third party EnViet",
+            "Vietjet, Gotadi"
+          ],
+          "business_meaning": "Tên providers - tương ứng với appID. Có thể hiểu là hãng, trừ trường hợp EnViet bao gồm Bamboo, Vietravel, Sun Phu Quoc Airways do 3 hãng này mình đi qua third party EnViet. Vietjet ~57%, VNA Domestic, EnViet Domestic, Gotadi (mới), Bamboo, VNA/EnViet Intl. KHÔNG còn map 1-1 với appID: Vietjet/Bamboo/Gotadi dùng chung tên cho cả DOM & INTL (phân biệt bằng appID hoặc flight_type).",
+          "data_type": "Text (cat)",
+          "name": "appUser"
+        },
+        {
+          "aliases": [
+            "Thời gian phát sinh giao dịch",
+            "khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào",
+            "2026-02-02 19:42:55.250"
+          ],
+          "business_meaning": "Thời gian phát sinh giao dịch. khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào. ✅ ĐÃ FIX (trước bị Excel làm hỏng thành mm:ss). Timestamp giao dịch, unique. Range 2024-12-01 → 2026-02-28, gồm 2 giai đoạn: T12/2024–T1/2025 và T12/2025–T2/2026 (so sánh YoY mùa Tết). booking_window = flight_date − reqDate (verify đúng 100%).",
+          "data_type": "Datetime",
+          "name": "reqDate"
+        },
+        {
+          "aliases": [
+            "Mã định danh của user trên Zalopay",
+            "1 user_id có thể phát sinh nhiều lần mua, khi đếm nên đếm unique user",
+            "210111001008381"
+          ],
+          "business_meaning": "Mã định danh của user trên Zalopay. 1 user_id có thể phát sinh nhiều lần mua, khi đếm nên đếm unique user. Khóa user. JOIN ↔ search_air.user_id. 12.386 user / 20.129 giao dịch.",
+          "data_type": "Integer (ID)",
+          "name": "userID"
+        },
+        {
+          "aliases": [
+            "Loại vé user mua: vé 1 chiều hay khứ hồi",
+            "Phải chuẩn hóa case (UPPER/LOWER) trước khi đếm hoặc join với trip_type bên search",
+            "OneWay / ONEWAY / RoundTrip / ROUNDTRIP"
+          ],
+          "business_meaning": "Loại vé user mua: vé 1 chiều hay khứ hồi. Phải chuẩn hóa case (UPPER/LOWER) trước khi đếm hoặc join với trip_type bên search. ⚠ Lẫn 2 kiểu viết: ONEWAY/ROUNDTRIP chỉ ở giai đoạn T12/2024–T1/2025 (dữ liệu cũ), OneWay/RoundTrip ở giai đoạn sau. Cần chuẩn hóa UPPER() khi group/join. Sau chuẩn hóa: OneWay ~93.5%, RoundTrip ~6.5%.",
+          "data_type": "Text (cat)",
+          "name": "round_type"
+        },
+        {
+          "aliases": [
+            "Điểm xuất phát (Mã sân bay)",
+            "Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA",
+            "SGN, HAN, UIH"
+          ],
+          "business_meaning": "Điểm xuất phát (Mã sân bay). Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA. Điểm đi. (= 'departure' bên search, khác tên cột).",
+          "data_type": "Text (IATA)",
+          "name": "origin"
+        },
+        {
+          "aliases": [
+            "Điểm đến (Mã sân bay)",
+            "Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA",
+            "HAN, SGN, VII"
+          ],
+          "business_meaning": "Điểm đến (Mã sân bay). Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA. Điểm đến.",
+          "data_type": "Text (IATA)",
+          "name": "dest"
+        },
+        {
+          "aliases": [
+            "Điểm xuất phát và điểm đến ghép lại",
+            "Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA",
+            "SGN-HAN"
+          ],
+          "business_meaning": "Điểm xuất phát và điểm đến ghép lại. Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA. origin + '-' + dest.",
+          "data_type": "Text",
+          "name": "route"
+        },
+        {
+          "aliases": [
+            "Chuyến bay nội địa hay quốc tế (nội địa định nghĩa là cả điểm đi và điểm đến là nội địa)",
+            "DOMESTIC / INTERNATIONAL"
+          ],
+          "business_meaning": "Chuyến bay nội địa hay quốc tế (nội địa định nghĩa là cả điểm đi và điểm đến là nội địa). DOMESTIC ~97% (19.528) / INTERNATIONAL ~3% (601).",
+          "data_type": "Text (cat)",
+          "name": "flight_type"
+        },
+        {
+          "aliases": [
+            "inbound: đi từ nước ngoài về VN, outbound: đi từ VN ra nước ngoài",
+            "inbound"
+          ],
+          "business_meaning": "inbound: đi từ nước ngoài về VN, outbound: đi từ VN ra nước ngoài. ⚠ 97.03% rỗng — chỉ 598 dòng có giá trị (316 inbound / 282 outbound). Liên quan chặng quốc tế/khứ hồi.",
+          "data_type": "Text (cat)",
+          "name": "in_out_bound"
+        },
+        {
+          "aliases": [
+            "Ngày cất cánh",
+            "2026-02-03"
+          ],
+          "business_meaning": "Ngày cất cánh. ✅ ĐÃ FIX format — giờ là ISO YYYY-MM-DD, CÙNG format với search_air.departure_date (trước là DD/MM/YYYY). Range 2025-01-13 → 2026-03-01.",
+          "data_type": "Date",
+          "name": "flight_date"
+        },
+        {
+          "aliases": [
+            "Thời gian kể từ thời điểm phát sinh giao dịch cho tới ngày bay",
+            "1, 4, 70"
+          ],
+          "business_meaning": "Thời gian kể từ thời điểm phát sinh giao dịch cho tới ngày bay",
+          "data_type": "Integer",
+          "name": "booking_window"
+        },
+        {
+          "aliases": [
+            "Thời gian kể từ thời điểm phát sinh giao dịch cho tới ngày bay chia về các group",
+            "31-60 days"
+          ],
+          "business_meaning": "Thời gian kể từ thời điểm phát sinh giao dịch cho tới ngày bay chia về các group. Nhóm hóa booking_window: Same day, 1-3, 4-7, 8-14, 15-30, 31-60, >60 days. (= user_search_group bên search, nhưng không có 'Unknown').",
+          "data_type": "Text (cat)",
+          "name": "booking_window_group"
+        },
+        {
+          "aliases": [
+            "Không dùng, chỉ là thời gian dữ liệu được updated",
+            "2026-02-03 04:55:40.246"
+          ],
+          "business_meaning": "Không dùng, chỉ là thời gian dữ liệu được updated. ✅ ĐÃ FIX (trước bị hỏng như reqDate). Thời điểm ETL nạp data (~04:55 sáng). Range 2025-12-03 → 2026-03-01.",
+          "data_type": "Datetime",
+          "name": "etl_date"
+        }
+      ],
+      "created_at": "2026-06-12T08:23:28.361928+00:00",
+      "description": "Zalopay AIR/OTA data dictionary for `payment_air`.",
+      "id": "dict_zlp_air_payment_air",
+      "owner": "Zalopay OTA",
+      "relationships": [
+        {
+          "from": "search_air.user_id",
+          "to": "payment_air.userID",
+          "type": "Khóa JOIN user (cùng định dạng 15-digit)."
+        },
+        {
+          "from": "search_air.departure",
+          "to": "payment_air.origin",
+          "type": "Điểm đi — khác tên cột, cùng nghĩa."
+        },
+        {
+          "from": "search_air.dest",
+          "to": "payment_air.dest",
+          "type": "Điểm đến."
+        },
+        {
+          "from": "search_air.route",
+          "to": "payment_air.route",
+          "type": "Cùng format DEP-DEST."
+        },
+        {
+          "from": "search_air.trip_type (One-way/Round-trip)",
+          "to": "payment_air.round_type (OneWay/ONEWAY/RoundTrip/ROUNDTRIP)",
+          "type": "⚠ payment lẫn case (UPPERCASE ở dữ liệu T12/2024–T1/2025) → chuẩn hóa UPPER() trước khi join."
+        },
+        {
+          "from": "search_air.departure_date (YYYY-MM-DD)",
+          "to": "payment_air.flight_date (YYYY-MM-DD)",
+          "type": "✅ Đã cùng format ISO — không còn lệch định dạng ngày."
+        },
+        {
+          "from": "search_air.day_diff / user_search_group",
+          "to": "payment_air.booking_window / booking_window_group",
+          "type": "Cùng logic 'ngày trước khi bay'; search đo từ search_date, payment đo từ reqDate. Buckets giống nhau (payment không có 'Unknown')."
+        },
+        {
+          "from": "search_air.search_date",
+          "to": "payment_air.date(reqDate)",
+          "type": "Cấp ngày phát sinh hành vi. reqDate đã fix, dùng trực tiếp (cột ymd cũ đã bỏ)."
+        },
+        {
+          "from": "search_air.Coverage: 2025-11-01 → 2026-02-28",
+          "to": "payment_air.Coverage: T12/2024–T1/2025 + T12/2025–T2/2026",
+          "type": "⚠ payment có thêm giai đoạn T12/2024–T1/2025 KHÔNG có search tương ứng → khi tính CR search→payment chỉ dùng giai đoạn trùng nhau."
+        }
+      ],
+      "status": "approved",
+      "table": "payment_air",
+      "updated_at": "2026-06-12T08:23:28.361928+00:00"
+    },
+    "dict_zlp_air_search_air": {
+      "columns": [
+        {
+          "aliases": [
+            "Mã định danh của user trên Zalopay",
+            "1 user_id có thể phát sinh nhiều lần search, khi đếm nên đếm unique user",
+            "200203000044327"
+          ],
+          "business_meaning": "Mã định danh của user trên Zalopay. 1 user_id có thể phát sinh nhiều lần search, khi đếm nên đếm unique user. Khóa user. JOIN ↔ payment_air.userID. 1.625.636 rows / 125.447 user.",
+          "data_type": "Integer (ID)",
+          "name": "user_id"
+        },
+        {
+          "aliases": [
+            "Thời gian user có hành vi search",
+            "khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào",
+            "2026-02-21 12:24:24"
+          ],
+          "business_meaning": "Thời gian user có hành vi search. khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào. Thời điểm phát sinh search (chính xác tới giây).",
+          "data_type": "Datetime",
+          "name": "activity_time"
+        },
+        {
+          "aliases": [
+            "Product service user đang sử dụng = Airlines - Vé máy bay",
+            "Air"
+          ],
+          "business_meaning": "Product service user đang sử dụng = Airlines - Vé máy bay. Chỉ có 'Air' — hằng số trong file này.",
+          "data_type": "Text (cat)",
+          "name": "product_line"
+        },
+        {
+          "aliases": [
+            "Điểm xuất phát (Mã sân bay)",
+            "Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA",
+            "HAN, SGN"
+          ],
+          "business_meaning": "Điểm xuất phát (Mã sân bay). Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA. Điểm đi. Mã sân bay IATA.",
+          "data_type": "Text (IATA)",
+          "name": "departure"
+        },
+        {
+          "aliases": [
+            "Điểm đến (Mã sân bay)",
+            "Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA",
+            "SGN, HAN"
+          ],
+          "business_meaning": "Điểm đến (Mã sân bay). Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA. Điểm đi. Mã sân bay IATA. Distinct 440 (gồm cả sân bay quốc tế).",
+          "data_type": "Text (IATA)",
+          "name": "dest"
+        },
+        {
+          "aliases": [
+            "Điểm xuất phát và điểm đến ghép lại",
+            "Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA",
+            "HAN-SGN"
+          ],
+          "business_meaning": "Điểm xuất phát và điểm đến ghép lại. Khi query, thay vì sử dụng mã sân bay, có thể sử dụng tên thành phố, nên phải tự map bằng log IATA. Điểm đến. Mã sân bay IATA. distinct dest (809) > departure (440).",
+          "data_type": "Text",
+          "name": "route"
+        },
+        {
+          "aliases": [
+            "Thời gian xuất phát/ cất cánh/khởi hành",
+            "khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào",
+            "2026-02-25"
+          ],
+          "business_meaning": "Thời gian xuất phát/ cất cánh/khởi hành. khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào. Ngày bay tìm kiếm. Range 2025-11-01 → 2027-03-13 (tương lai).",
+          "data_type": "Date",
+          "name": "departure_date"
+        },
+        {
+          "aliases": [
+            "Loại vé user search: vé 1 chiều hay khứ hồi",
+            "One-way / Round-trip"
+          ],
+          "business_meaning": "Loại vé user search: vé 1 chiều hay khứ hồi. One-way ~83%, Round-trip ~17%. (≈ round_type bên payment, khác cách viết).",
+          "data_type": "Text (cat)",
+          "name": "trip_type"
+        },
+        {
+          "aliases": [
+            "Ngày user có hành vi search",
+            "khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào",
+            "2026-02-21"
+          ],
+          "business_meaning": "Ngày user có hành vi search. khi query nếu có chỉ số về thời gian, nên hỏi lại constraint về thời gian là dành cho cột thời gian nào. Ngày thực hiện search. Range 2025-11-01 → 2026-02-28.",
+          "data_type": "Date",
+          "name": "search_date"
+        },
+        {
+          "aliases": [
+            "Thứ trong tuần user có hành vi search",
+            "Tự qui đổi qua tiếng Việt được",
+            "Saturday"
+          ],
+          "business_meaning": "Thứ trong tuần user có hành vi search. Tự qui đổi qua tiếng Việt được. Thứ trong tuần của search_date.",
+          "data_type": "Text (cat)",
+          "name": "search_day_in_week"
+        },
+        {
+          "aliases": [
+            "Thứ trong tuần user khởi hành/xuất phát/ cất cánh",
+            "Tự qui đổi qua tiếng Việt được",
+            "Wednesday"
+          ],
+          "business_meaning": "Thứ trong tuần user khởi hành/xuất phát/ cất cánh. Tự qui đổi qua tiếng Việt được. Thứ trong tuần của departure_date.",
+          "data_type": "Text (cat)",
+          "name": "departure_day_in_week"
+        },
+        {
+          "aliases": [
+            "Số ngày từ lúc search tới ngày khởi hành dự kiến",
+            "≈ booking_window bên payment nhưng đo từ search_date. Loại các dòng -1/Unknown khi phân tích.",
+            "4, 7, -1"
+          ],
+          "business_meaning": "Số ngày từ lúc search tới ngày khởi hành dự kiến. ≈ booking_window bên payment nhưng đo từ search_date. Loại các dòng -1/Unknown khi phân tích.. ✅ ĐÃ FIX (trước đánh dấu bỏ cột do lỗi dữ liệu). = departure_date − search_date, verify đúng 100%. Range −1 → 380. 75 dòng = −1 tương ứng user_search_group = Unknown.",
+          "data_type": "Integer",
+          "name": "day_diff"
+        },
+        {
+          "aliases": [
+            "Nhóm hóa day_diff về các group",
+            "4-7 days"
+          ],
+          "business_meaning": "Nhóm hóa day_diff về các group. ✅ ĐÃ FIX (trước đánh dấu bỏ cột do lỗi dữ liệu). 8 giá trị: Same day, 1-3, 4-7, 8-14, 15-30, 31-60, >60 days + 'Unknown' (75 dòng, ứng với day_diff = −1).",
+          "data_type": "Text (cat)",
+          "name": "user_search_group"
+        },
+        {
+          "aliases": [
+            "không dùng để đọc insight",
+            "2026-02-22 04:58:55.286"
+          ],
+          "business_meaning": "không dùng để đọc insight. không dùng để đọc insight. Thời điểm ETL nạp data (~04:58 mỗi sáng). 1 giá trị / search_date.",
+          "data_type": "Datetime",
+          "name": "etl_date"
+        }
+      ],
+      "created_at": "2026-06-12T08:23:28.361928+00:00",
+      "description": "Zalopay AIR/OTA data dictionary for `search_air`.",
+      "id": "dict_zlp_air_search_air",
+      "owner": "Zalopay OTA",
+      "relationships": [
+        {
+          "from": "search_air.user_id",
+          "to": "payment_air.userID",
+          "type": "Khóa JOIN user (cùng định dạng 15-digit)."
+        },
+        {
+          "from": "search_air.departure",
+          "to": "payment_air.origin",
+          "type": "Điểm đi — khác tên cột, cùng nghĩa."
+        },
+        {
+          "from": "search_air.dest",
+          "to": "payment_air.dest",
+          "type": "Điểm đến."
+        },
+        {
+          "from": "search_air.route",
+          "to": "payment_air.route",
+          "type": "Cùng format DEP-DEST."
+        },
+        {
+          "from": "search_air.trip_type (One-way/Round-trip)",
+          "to": "payment_air.round_type (OneWay/ONEWAY/RoundTrip/ROUNDTRIP)",
+          "type": "⚠ payment lẫn case (UPPERCASE ở dữ liệu T12/2024–T1/2025) → chuẩn hóa UPPER() trước khi join."
+        },
+        {
+          "from": "search_air.departure_date (YYYY-MM-DD)",
+          "to": "payment_air.flight_date (YYYY-MM-DD)",
+          "type": "✅ Đã cùng format ISO — không còn lệch định dạng ngày."
+        },
+        {
+          "from": "search_air.day_diff / user_search_group",
+          "to": "payment_air.booking_window / booking_window_group",
+          "type": "Cùng logic 'ngày trước khi bay'; search đo từ search_date, payment đo từ reqDate. Buckets giống nhau (payment không có 'Unknown')."
+        },
+        {
+          "from": "search_air.search_date",
+          "to": "payment_air.date(reqDate)",
+          "type": "Cấp ngày phát sinh hành vi. reqDate đã fix, dùng trực tiếp (cột ymd cũ đã bỏ)."
+        },
+        {
+          "from": "search_air.Coverage: 2025-11-01 → 2026-02-28",
+          "to": "payment_air.Coverage: T12/2024–T1/2025 + T12/2025–T2/2026",
+          "type": "⚠ payment có thêm giai đoạn T12/2024–T1/2025 KHÔNG có search tương ứng → khi tính CR search→payment chỉ dùng giai đoạn trùng nhau."
+        }
+      ],
+      "status": "approved",
+      "table": "search_air",
+      "updated_at": "2026-06-12T08:23:28.361928+00:00"
+    }
+  },
+  "schema_version": 1
+}

@@ -1,4 +1,380 @@
 {
-  "knowledge": {},
+  "knowledge": {
+    "kn_zlp_air_aov": {
+      "candidate_ids": [],
+      "canonical_definition": "TPV / số lượng transaction. Là giá trị trung bình 1 transaction, phản ánh package mix. KHÔNG dùng AOV cho góc per-user.",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"giá trị đơn hàng trung bình\", \"giá trị trung bình mỗi đơn/mỗi giao dịch\", \"average order value\", \"basket size\", \"TPV per transaction\", \"TPV/txn\"."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_aov",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "AOV",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "giá trị đơn hàng trung bình",
+        "giá trị trung bình mỗi đơn/mỗi giao dịch",
+        "average order value",
+        "basket size",
+        "TPV per transaction",
+        "TPV/txn",
+        "AOV (Average Order Value)"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_arppu": {
+      "candidate_ids": [],
+      "canonical_definition": "TPV / số lượng paying user, định nghĩa theo life-cycle — tổng mức chi tiêu trung bình của 1 user trong toàn life-cycle. Luôn khai báo rõ window life-cycle đang xét. Đây là góc \"1 user mang về bao nhiêu\" (không phải AOV/user).",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"average revenue per paying user\", \"chi tiêu trung bình mỗi user\", \"spend per user\", \"1 user mang về bao nhiêu (tiền)\", \"doanh thu trung bình trên paying user\", \"TPV per user\"."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_arppu",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "ARPPU",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "average revenue per paying user",
+        "chi tiêu trung bình mỗi user",
+        "spend per user",
+        "1 user mang về bao nhiêu (tiền)",
+        "doanh thu trung bình trên paying user",
+        "TPV per user"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_atp": {
+      "candidate_ids": [],
+      "canonical_definition": "tổng TPV / tổng số lượng vé. Giá trị trung bình 1 vé máy bay (đơn vị = ticket). Air-specific.",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"giá vé trung bình\", \"giá trung bình 1 vé\", \"average ticket price/value\", \"fare trung bình\", \"TPV per ticket\"."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_atp",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "ATP",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "giá vé trung bình",
+        "giá trung bình 1 vé",
+        "average ticket price/value",
+        "fare trung bình",
+        "TPV per ticket",
+        "ATP (Average Ticket Price / average ticket value)"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_booking_window": {
+      "candidate_ids": [],
+      "canonical_definition": "departure_date − reqDate (theo ngày). reqDate = thời điểm phát sinh giao dịch; departure_date = thời điểm cất cánh. Chia nhóm chuẩn: Same day, 1–3D, 4–7D, 8–14D, 15–30D, >30D. (Đây là định nghĩa chốt của team, thay cho lead time generic.)",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"lead time\", \"đặt trước bao nhiêu ngày\", \"khoảng cách ngày đặt – ngày bay\", \"mua trước/book trước X ngày\", \"advance purchase window\"."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_booking_window",
+      "kind": "dimension",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "booking_window",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "lead time",
+        "đặt trước bao nhiêu ngày",
+        "khoảng cách ngày đặt – ngày bay",
+        "mua trước/book trước X ngày",
+        "advance purchase window"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_cr": {
+      "candidate_ids": [],
+      "canonical_definition": "số user vào step cuối / số user vào step đầu, trong cùng 1 tracking_session_id. Không tự assume Traffic→Paid; mỗi lần đưa số phải khai báo rõ đo từ step nào đến step nào.",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"conversion\", \"convert rate\", \"tỉ lệ chuyển đổi\", \"funnel CR\", \"tỉ lệ rớt funnel\" (góc ngược = drop-off), \"CR step X→Y\".",
+        "tracking_session_id: 1 user mở app rồi tắt = 1 tracking_session_id; mở nhiều lần → nhiều id.",
+        "CR view này bắt buộc hành vi xảy ra trong cùng 1 lượt mở app (đồng-session) — phải nói rõ điều kiện này khi report.",
+        "Hạn chế: user treo app 1–2 ngày không tắt vẫn tính cùng 1 tracking_session_id → session kéo dài, CR có thể méo."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_cr",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "CR",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "conversion",
+        "convert rate",
+        "tỉ lệ chuyển đổi",
+        "funnel CR",
+        "tỉ lệ rớt funnel\" (góc ngược = drop-off)",
+        "CR step X→Y",
+        "CR (Conversion Rate)"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_mpu": {
+      "candidate_ids": [],
+      "canonical_definition": "user phát sinh giao dịch thành công trong tháng.",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"monthly paying user\", \"PU tháng\", \"user pay trong tháng\", \"số user giao dịch theo tháng\".",
+        "User segmentation N/F/R (mutually exclusive) — naming chuẩn team:",
+        "*Alias:* \"phân loại user N/F/R\", \"user mới / new user\" (→ hỏi lại: NPU hay FPU?), \"khách mới toàn Zalopay\" (NPU), \"user lần đầu dùng dịch vụ X\" (FPU), \"user quay lại / returning / repeat user\" (RPU), \"user trung thành / pay đều\" (Consecutive), \"user hồi sinh / quay lại sau khi nghỉ / win-back\" (Resurrected)."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_mpu",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "MPU",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "monthly paying user",
+        "PU tháng",
+        "user pay trong tháng",
+        "số user giao dịch theo tháng",
+        "phân loại user N/F/R",
+        "user mới / new user\" (→ hỏi lại: NPU hay FPU?)",
+        "khách mới toàn Zalopay\" (NPU)",
+        "user lần đầu dùng dịch vụ X\" (FPU)",
+        "user quay lại / returning / repeat user\" (RPU)",
+        "user trung thành / pay đều\" (Consecutive)",
+        "user hồi sinh / quay lại sau khi nghỉ / win-back\" (Resurrected)",
+        "MPU (Monthly Paying User)"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_npu": {
+      "candidate_ids": [],
+      "canonical_definition": "New Paying User: user phát sinh giao dịch chủ động (chi tiền), trả cho dịch vụ đầu tiên trên toàn Zalopay.",
+      "change_history": [],
+      "conditions": [
+        "FPU (exclude NPU) = First Paying User: lần đầu chi tiền cho 1 category hoặc sub_category cụ thể, nhưng đã từng pay ZLP trước đó."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_npu",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "NPU",
+      "owner": "Zalopay OTA",
+      "paraphrases": [],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_pu": {
+      "candidate_ids": [],
+      "canonical_definition": "user có phát sinh giao dịch thành công.",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"paying user\", \"user trả tiền\", \"user có giao dịch (thành công)\", \"user phát sinh giao dịch\"."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_pu",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "PU",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "paying user",
+        "user trả tiền",
+        "user có giao dịch (thành công)",
+        "user phát sinh giao dịch",
+        "PU (Paying User)"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_route": {
+      "candidate_ids": [],
+      "canonical_definition": "cặp điểm đi – điểm đến theo IATA airport code (3 ký tự, vd SGN–HAN). UX nuance: user tìm bằng code / tên sân bay / tên thành phố; 1 thành phố có thể có nhiều sân bay → khi map city→route phải gom đủ airport của city đó, nên có bảng map city → [airport codes] để chuẩn hoá, tránh đếm lệch demand. IATA code ref: https://www.iata.org/en/publications/directories/code-search/",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"chặng\", \"chặng bay\", \"tuyến (bay)\", \"OD pair / origin–destination\", \"điểm đi – điểm đến\", \"cặp sân bay\"."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_route",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "route",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "chặng",
+        "chặng bay",
+        "tuyến (bay)",
+        "OD pair / origin–destination",
+        "điểm đi – điểm đến",
+        "cặp sân bay"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_rpu": {
+      "candidate_ids": [],
+      "canonical_definition": "Remain Paying User: phát sinh giao dịch từ lần thứ 2 trở lên (trên grain đang xét).",
+      "change_history": [],
+      "conditions": [
+        "Consecutive: RPU có pay M-1 và pay M0.",
+        "Resurrected: RPU không pay M-1, pay lại M0.",
+        "Retention Rate (RR) — period KHÔNG cố định, phải hỏi trước khi tính: tháng→tháng / quý→quý / tuần→tuần. RR30 thường ngầm định là view monthly (M→M+1), nhưng đừng tự assume — week/quarter ra số và cách đọc khác hẳn. Đọc theo segment (RR của N = chất lượng acquisition; RR của R = stickiness), không so cross-segment.",
+        "*Alias:* \"retention\", \"tỉ lệ giữ chân\", \"tỉ lệ quay lại\", \"RR30 / RR7\", \"user còn ở lại sau X tháng/tuần\", \"churn\" (góc ngược = 1 − RR).",
+        "⚠ BẮT BUỘC hỏi lại user + check hệ thống: N/F/R định nghĩa theo category hay sub_category? Ra số khác hẳn nhau, đặc biệt FPU.",
+        "Category = nhóm dịch vụ lớn: Telco, OTA, Billing (list đầy đủ feed sau).",
+        "Sub_category = dịch vụ con trong category: OTA→Air/Bus/Train; Telco→topup/data package.",
+        "VD: F theo category OTA → user từng đi Bus rồi mua Air KHÔNG tính FPU. F theo sub_category Air → cùng user đó mua Air lần đầu VẪN tính FPU.",
+        "Liên quan: project_ota_traffic_funnel (funnel Hub Bus & Air dùng intent split has_search/interact/no_interact)."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_rpu",
+      "kind": "metric",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "RPU",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "retention",
+        "tỉ lệ giữ chân",
+        "tỉ lệ quay lại",
+        "RR30 / RR7",
+        "user còn ở lại sau X tháng/tuần",
+        "churn\" (góc ngược = 1 − RR)"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    },
+    "kn_zlp_air_ticket_num": {
+      "candidate_ids": [],
+      "canonical_definition": "số lượng vé trong 1 giao dịch (pax/vé per booking). Roundtrip & booking đoàn → ticket_num cao.",
+      "change_history": [],
+      "conditions": [
+        "*Alias:* \"số vé mỗi đơn/mỗi giao dịch\", \"pax\", \"số khách trong booking\", \"tickets per booking/transaction\", \"số lượng vé/đơn\".",
+        "Quan hệ: AOV = ATP × ticket_num trung bình/giao dịch. AOV = TPV/transaction (đơn, có thể nhiều vé); ATP = TPV/ticket (1 vé). AOV tăng mà ATP flat → user mua nhiều vé/đơn hơn, không phải vé đắt hơn."
+      ],
+      "confidence": 0.98,
+      "created_at": "2026-06-12T08:23:28.253327+00:00",
+      "created_by": "zalopay_air_ingest",
+      "domain": "Zalopay AIR/OTA",
+      "evidence_event_ids": [
+        "zlp_air_reference_import"
+      ],
+      "examples": [],
+      "formula": "",
+      "id": "kn_zlp_air_ticket_num",
+      "kind": "dimension",
+      "logic": "Zalopay AIR/OTA approved metric definition. Override generic definitions for Air/OTA requests.",
+      "name": "ticket_num",
+      "owner": "Zalopay OTA",
+      "paraphrases": [
+        "số vé mỗi đơn/mỗi giao dịch",
+        "pax",
+        "số khách trong booking",
+        "tickets per booking/transaction",
+        "số lượng vé/đơn"
+      ],
+      "status": "approved",
+      "updated_at": "2026-06-12T08:23:28.253327+00:00",
+      "version": 1
+    }
+  },
   "schema_version": 1
 }

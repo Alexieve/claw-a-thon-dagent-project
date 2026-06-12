@@ -1,8 +1,9 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from knowledge_store import KnowledgeParser, KnowledgeStore, extract_acronyms
+from knowledge_store import KnowledgeParser, KnowledgeStore, RuntimeSkillRegistry, extract_acronyms
 
 
 class RankingParser(KnowledgeParser):
@@ -36,8 +37,71 @@ class ParentheticalNameParser(KnowledgeParser):
         ]
 
 
+class FakeChatLLM:
+    def __init__(self, *, plans=None, text="LLM trả lời tự nhiên từ context.") -> None:
+        self.plans = list(plans or [{"action": "answer_direct", "answer": text, "confidence": 0.9}])
+        self.text = text
+
+    def configured(self):
+        return True
+
+    def complete_json(self, *, system, user, temperature=0):
+        if "draft SQL" in system or "draft SQL" in system.lower():
+            return {}
+        if "select runtime skills" in system:
+            import json
+
+            data = json.loads(user)
+            names = [item.get("name") for item in data.get("candidates", [])]
+            selected = ["air-sql-analyst"] if "air-sql-analyst" in names else []
+            return {"selected_skills": selected, "reason": "selected by fake runtime skill selector" if selected else ""}
+        if "action planner" in system:
+            if len(self.plans) > 1:
+                return self.plans.pop(0)
+            return self.plans[0]
+        return {}
+
+    def complete_text(self, *, system, user, temperature=0.2):
+        return self.text
+
+
+class CapturingPlannerLLM(FakeChatLLM):
+    def __init__(self, *, plan=None) -> None:
+        super().__init__(plans=[plan or {"action": "answer_direct", "answer": "ok", "confidence": 0.9}])
+        self.planner_inputs = []
+        self.skill_selector_inputs = []
+
+    def complete_json(self, *, system, user, temperature=0):
+        if "select runtime skills" in system:
+            import json
+
+            self.skill_selector_inputs.append(json.loads(user))
+        if "action planner" in system:
+            import json
+
+            self.planner_inputs.append(json.loads(user))
+        return super().complete_json(system=system, user=user, temperature=temperature)
+
+
+class FakeMemoryEventStore:
+    def __init__(self, *, events=None, delay=0) -> None:
+        self.events = list(events or [])
+        self.delay = delay
+        self.appended = []
+
+    def append_event(self, *, chat_session, user_id, session_id, role, content):
+        if self.delay:
+            time.sleep(self.delay)
+        self.appended.append({"role": role, "content": content, "created_at": "2026-06-12T00:00:00+00:00"})
+
+    def list_recent_events(self, *, chat_session, user_id, session_id, limit):
+        if self.delay:
+            time.sleep(self.delay)
+        return self.events[-limit:]
+
+
 class KnowledgeStoreTest(unittest.TestCase):
-    def make_store(self, parser=None) -> KnowledgeStore:
+    def make_store(self, parser=None, llm_client=None, **kwargs) -> KnowledgeStore:
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         root = Path(tmpdir.name)
@@ -47,10 +111,78 @@ class KnowledgeStoreTest(unittest.TestCase):
             knowledge_base_path=root / "knowledge_base.json",
             document_chunks_path=root / "document_chunks.jsonl",
             teaching_sessions_path=root / "teaching_sessions.json",
+            chat_sessions_path=root / "chat_sessions.json",
+            data_dictionary_path=root / "data_dictionary.json",
+            question_examples_path=root / "question_examples.json",
             parser=parser or KnowledgeParser(),
+            llm_client=llm_client,
+            **kwargs,
         )
         store.bootstrap()
         return store
+
+    def teach_rpu(self, store: KnowledgeStore):
+        return store.teach_text(
+            text="RPU là Revenue Per User, doanh thu trung bình trên mỗi active user. Công thức total revenue / active users.",
+            stakeholder="Finance",
+            team="Revenue",
+        )["knowledge_created"][0]
+
+    def add_rpu_dictionary(self, store: KnowledgeStore) -> None:
+        store.add_data_dictionary(
+            table="payments",
+            description="Bảng giao dịch thanh toán",
+            columns=[
+                {
+                    "name": "amount",
+                    "business_meaning": "Doanh thu thanh toán",
+                    "data_type": "numeric",
+                    "aliases": ["revenue", "gmv", "payment amount"],
+                },
+                {
+                    "name": "user_id",
+                    "business_meaning": "User phát sinh giao dịch",
+                    "data_type": "text",
+                    "aliases": ["user", "active user"],
+                },
+                {
+                    "name": "campaign_id",
+                    "business_meaning": "Campaign của giao dịch",
+                    "data_type": "text",
+                    "aliases": ["campaign"],
+                },
+            ],
+            relationships=[
+                {"from": "payments.campaign_id", "to": "campaigns.id", "type": "many_to_one"},
+            ],
+            owner="data-team",
+        )
+        store.add_data_dictionary(
+            table="campaigns",
+            description="Bảng campaign marketing",
+            columns=[
+                {
+                    "name": "id",
+                    "business_meaning": "Khóa campaign",
+                    "data_type": "text",
+                    "aliases": ["campaign id"],
+                },
+                {
+                    "name": "campaign_name",
+                    "business_meaning": "Tên campaign",
+                    "data_type": "text",
+                    "aliases": ["campaign"],
+                },
+            ],
+            owner="data-team",
+        )
+
+    def teach_arppu(self, store: KnowledgeStore):
+        return store.teach_text(
+            text="ARPPU là Average Revenue Per Paying User, doanh thu trung bình trên mỗi paying user. Công thức total revenue / paying users.",
+            stakeholder="Finance",
+            team="Revenue",
+        )["knowledge_created"][0]
 
     def test_extract_acronyms_keeps_order_and_uniqueness(self):
         self.assertEqual(extract_acronyms("FPU and NPU, then FPU again"), ["FPU", "NPU"])
@@ -58,7 +190,22 @@ class KnowledgeStoreTest(unittest.TestCase):
     def test_default_storage_backend_is_json(self):
         store = self.make_store()
 
-        self.assertEqual(store.storage_status(), {"backend": "json", "database_configured": False})
+        status = store.storage_status()
+
+        self.assertEqual(status["backend"], "json")
+        self.assertFalse(status["database_configured"])
+        self.assertEqual(status["chat_context_backend"], "auto")
+        self.assertFalse(status["chat_context_memory_configured"])
+
+    def test_chat_agentbase_context_strict_requires_memory_config(self):
+        store = self.make_store(
+            chat_context_backend="agentbase",
+            chat_context_memory_id="",
+            chat_context_fallback_on_error=False,
+        )
+
+        with self.assertRaises(ValueError):
+            store.chat(message="RPU là gì?", user_id="quynh", session_id="strict-memory")
 
     def test_teach_text_confirmed_new_knowledge_goes_directly_to_kb(self):
         store = self.make_store()
@@ -213,6 +360,727 @@ class KnowledgeStoreTest(unittest.TestCase):
         result = store.search_knowledge("NPU")
 
         self.assertEqual([item["name"] for item in result], ["NPU"])
+
+    def test_search_data_dictionary_matches_column_alias(self):
+        store = self.make_store()
+        store.add_data_dictionary(
+            table="payments",
+            columns=[
+                {
+                    "name": "amount",
+                    "business_meaning": "Doanh thu thanh toán",
+                    "data_type": "numeric",
+                    "aliases": ["revenue", "gmv"],
+                }
+            ],
+        )
+
+        result = store.search_data_dictionary("gmv")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["table"], "payments")
+
+    def test_ask_data_question_without_dictionary_returns_missing_context(self):
+        store = self.make_store()
+        self.teach_rpu(store)
+
+        result = store.ask_data_question("RPU tháng 6 theo campaign là bao nhiêu?")
+
+        self.assertEqual(result["status"], "needs_dictionary")
+        self.assertIn("RPU", [item["concept"] for item in result["missing"]])
+        self.assertIn("campaign", [item["concept"] for item in result["missing"]])
+
+    def test_ask_data_question_with_partial_dictionary_still_needs_dictionary(self):
+        store = self.make_store()
+        self.teach_rpu(store)
+        store.add_data_dictionary(
+            table="campaigns",
+            columns=[
+                {
+                    "name": "campaign_name",
+                    "business_meaning": "Tên campaign",
+                    "data_type": "text",
+                    "aliases": ["campaign"],
+                }
+            ],
+        )
+
+        result = store.ask_data_question("RPU tháng 6 theo campaign là bao nhiêu?")
+
+        self.assertEqual(result["status"], "needs_dictionary")
+        self.assertIn("RPU", [item["concept"] for item in result["missing"]])
+        self.assertNotIn("campaign", [item["concept"] for item in result["missing"]])
+
+    def test_ask_data_question_with_enough_dictionary_returns_sql_draft(self):
+        store = self.make_store()
+        self.teach_rpu(store)
+        self.add_rpu_dictionary(store)
+
+        result = store.ask_data_question("RPU tháng 6 theo campaign là bao nhiêu?")
+
+        self.assertEqual(result["status"], "sql_draft")
+        self.assertEqual(result["used_example_ids"], [])
+        self.assertIn("SUM(payments.amount)", result["sql"])
+        self.assertIn("campaign_name", result["sql"])
+        self.assertIn("GROUP BY", result["sql"])
+
+    def test_ask_data_question_uses_nearby_question_example_when_available(self):
+        store = self.make_store()
+        self.teach_rpu(store)
+        self.add_rpu_dictionary(store)
+        example = store.add_question_example(
+            question="RPU theo campaign",
+            sql="SELECT campaign_name, SUM(amount) / COUNT(DISTINCT user_id) AS rpu FROM mart_rpu GROUP BY campaign_name;",
+            explanation="Mẫu approved cho RPU theo campaign",
+            concepts=["RPU", "campaign"],
+            used_tables=["mart_rpu"],
+        )
+
+        result = store.ask_data_question("RPU tháng 6 theo campaign là bao nhiêu?")
+
+        self.assertEqual(result["status"], "sql_draft")
+        self.assertEqual(result["sql"], example["sql"])
+        self.assertEqual(result["used_example_ids"], [example["id"]])
+
+    def test_chat_freeform_metric_name_question_answers_naturally_with_planner(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "answer_direct",
+                        "answer": "RPU dùng active user, còn ARPPU dùng paying user.",
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+        self.teach_rpu(store)
+        self.teach_arppu(store)
+
+        result = store.chat(message="Tôi muốn biết doanh thu trung bình được gọi là gì?", user_id="quynh")
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["intent"], "planner_answer")
+        self.assertIn("RPU", result["answer"])
+        self.assertIn("ARPPU", result["answer"])
+        self.assertIn("active user", result["answer"])
+        self.assertIn("paying user", result["answer"])
+        self.assertTrue(result["debug"]["llm_used"])
+
+    def test_chat_freeform_definition_question_uses_retrieved_knowledge(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[{"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9}]
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU là gì?")
+
+        self.assertEqual(result["status"], "answered")
+        self.assertIn("Revenue Per User", result["answer"])
+        self.assertEqual(result["used_knowledge_ids"], [store.search_knowledge("RPU")[0]["id"]])
+
+    def test_chat_without_llm_returns_llm_required(self):
+        store = self.make_store()
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU là gì?")
+
+        self.assertEqual(result["status"], "llm_required")
+        self.assertEqual(result["intent"], "llm_required")
+        self.assertFalse(result["debug"]["planner_used"])
+
+    def test_chat_planner_receives_air_sql_runtime_skill_for_air_question(self):
+        llm = CapturingPlannerLLM()
+        store = self.make_store(llm_client=llm)
+        store.teach_text(
+            text="AOV là Average Order Value, giá trị đơn hàng trung bình.",
+            stakeholder="Trang",
+            team="Zalopay AIR/OTA",
+            domain="Zalopay AIR/OTA",
+            owner="Zalopay OTA",
+        )
+
+        result = store.chat(message="AOV Air là gì?", user_id="quynh", session_id="air-skill")
+
+        skills = llm.planner_inputs[-1]["runtime_skills"]
+        self.assertEqual(skills[0]["name"], "air-sql-analyst")
+        self.assertTrue(any("Presto/Trino" in item for item in skills[0]["instructions"]))
+        self.assertEqual(result["debug"]["runtime_skills_used"], ["air-sql-analyst"])
+        candidate_names = [item["name"] for item in result["debug"]["runtime_skill_candidates"]]
+        self.assertEqual(candidate_names, ["air-sql-analyst"])
+        self.assertNotIn("agentbase", " ".join(candidate_names))
+        self.assertEqual(llm.skill_selector_inputs, [])
+        self.assertIn("auto-selected", result["debug"]["runtime_skill_selection_reason"])
+
+    def test_chat_planner_skips_air_sql_runtime_skill_for_non_air_question(self):
+        llm = CapturingPlannerLLM()
+        store = self.make_store(llm_client=llm)
+
+        store.chat(message="Bạn là ai?", user_id="quynh", session_id="general-skill")
+
+        self.assertEqual(llm.planner_inputs[-1]["runtime_skills"], [])
+        self.assertEqual(llm.skill_selector_inputs, [])
+
+    def test_chat_can_disable_runtime_skill_per_request(self):
+        llm = CapturingPlannerLLM()
+        store = self.make_store(llm_client=llm)
+        store.teach_text(
+            text="AOV là Average Order Value, giá trị đơn hàng trung bình.",
+            stakeholder="Trang",
+            team="Zalopay AIR/OTA",
+            domain="Zalopay AIR/OTA",
+            owner="Zalopay OTA",
+        )
+
+        result = store.chat(
+            message="AOV Air là gì?",
+            user_id="quynh",
+            session_id="air-skill-disabled",
+            use_runtime_skills=False,
+        )
+
+        self.assertEqual(llm.planner_inputs[-1]["runtime_skills"], [])
+        self.assertEqual(result["debug"]["runtime_skills_used"], [])
+        self.assertFalse(result["debug"]["runtime_skills_enabled"])
+        self.assertEqual(result["debug"]["runtime_skill_selection_reason"], "runtime skills disabled by request/config")
+        self.assertEqual(llm.skill_selector_inputs, [])
+
+    def test_chat_runtime_skill_config_default_can_be_disabled(self):
+        llm = CapturingPlannerLLM()
+        store = self.make_store(llm_client=llm, runtime_skills_enabled=False)
+        store.teach_text(
+            text="AOV là Average Order Value, giá trị đơn hàng trung bình.",
+            stakeholder="Trang",
+            team="Zalopay AIR/OTA",
+            domain="Zalopay AIR/OTA",
+            owner="Zalopay OTA",
+        )
+
+        result = store.chat(message="AOV Air là gì?", user_id="quynh", session_id="air-skill-config-disabled")
+
+        self.assertEqual(llm.planner_inputs[-1]["runtime_skills"], [])
+        self.assertFalse(result["debug"]["runtime_skills_enabled"])
+
+    def test_chat_response_excludes_full_context_by_default(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[{"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9}]
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU là gì?", user_id="quynh", session_id="light-response")
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["used_knowledge_ids"], [store.search_knowledge("RPU")[0]["id"]])
+        self.assertNotIn("knowledge", result)
+        self.assertNotIn("dictionary", result)
+        self.assertNotIn("examples", result)
+        self.assertIn("latency_ms", result["debug"])
+        self.assertIn("total", result["debug"]["latency_ms"])
+
+    def test_chat_response_includes_full_context_when_debug_context_enabled(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[{"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9}]
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU là gì?", user_id="quynh", session_id="debug-response", debug_context=True)
+
+        self.assertEqual(result["status"], "answered")
+        self.assertIn("knowledge", result)
+        self.assertEqual(result["knowledge"][0]["name"], "RPU")
+
+    def test_runtime_skill_registry_requires_enabled_runtime_json(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        enabled = root / "enabled-skill"
+        disabled = root / "disabled-skill"
+        no_runtime = root / "no-runtime-skill"
+        enabled.mkdir()
+        disabled.mkdir()
+        no_runtime.mkdir()
+        enabled.joinpath("SKILL.md").write_text("---\nname: enabled-skill\ndescription: Enabled runtime skill.\n---\n\n## Core Workflow\nUse me.", encoding="utf-8")
+        enabled.joinpath("runtime.json").write_text('{"enabled": true, "trigger_terms": ["alpha"], "instruction_sections": ["Core Workflow"]}', encoding="utf-8")
+        disabled.joinpath("SKILL.md").write_text("---\nname: disabled-skill\ndescription: Disabled runtime skill.\n---\n\n## Core Workflow\nDo not use me.", encoding="utf-8")
+        disabled.joinpath("runtime.json").write_text('{"enabled": false, "trigger_terms": ["alpha"]}', encoding="utf-8")
+        no_runtime.joinpath("SKILL.md").write_text("---\nname: no-runtime-skill\ndescription: No runtime metadata.\n---\n\n## Core Workflow\nDo not use me.", encoding="utf-8")
+
+        registry = RuntimeSkillRegistry(skills_path=root)
+        candidates = registry.query_candidates("alpha")
+
+        self.assertEqual([item["name"] for item in candidates], ["enabled-skill"])
+        payload = registry.skill_payload(candidates[0])
+        self.assertEqual(payload["name"], "enabled-skill")
+        self.assertIn("Use me", payload["instructions"][0])
+
+    def test_chat_data_question_routes_to_missing_dictionary_flow(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[{"action": "propose_data_query", "answer": "", "payload": {"resolved_message": "RPU tháng 6 theo campaign là bao nhiêu?"}, "confidence": 0.9}]
+                ,
+                text="Mình thiếu mapping bảng/cột để sinh SQL an toàn.",
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU tháng 6 theo campaign là bao nhiêu?")
+
+        self.assertEqual(result["intent"], "data_sql")
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertTrue(result["requires_confirmation"])
+        self.assertEqual(result["pending_action_type"], "data_query")
+
+        confirmed = store.chat(
+            message="confirm",
+            session_id=result["chat_session_id"],
+            pending_action_id=result["pending_action_id"],
+        )
+
+        self.assertEqual(confirmed["intent"], "data_sql")
+        self.assertEqual(confirmed["status"], "needs_dictionary")
+        self.assertIn("mapping bảng/cột", confirmed["answer"])
+
+    def test_chat_refines_pending_data_query_from_clarification_answer(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "propose_data_query",
+                        "answer": "",
+                        "payload": {"resolved_message": "Top route thực mua theo provider là gì?"},
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+
+        proposed = store.chat(
+            message="Top route thực mua theo provider là gì?",
+            user_id="quynh",
+            session_id="pending-data-refine",
+        )
+        refined = store.chat(
+            message="Xếp hạng theo số giao dịch transID",
+            user_id="quynh",
+            session_id="pending-data-refine",
+        )
+
+        self.assertEqual(refined["status"], "needs_confirmation")
+        self.assertEqual(refined["pending_action_id"], proposed["pending_action_id"])
+        self.assertEqual(refined["pending_action_type"], "data_query")
+        self.assertIn("Top route thực mua", refined["question"])
+        self.assertIn("Xếp hạng theo số giao dịch transID", refined["question"])
+        self.assertTrue(refined["debug"]["pending_action_refined"])
+
+    def test_chat_mixed_definition_and_data_requires_data_confirmation(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "answer_and_propose_data_query",
+                        "answer": "RPU là Revenue Per User.",
+                        "payload": {"resolved_message": "RPU tháng 6 theo campaign bao nhiêu?"},
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU là gì, tháng 6 theo campaign bao nhiêu?", session_id="mixed-data")
+
+        self.assertEqual(result["intent"], "data_sql")
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertEqual(result["pending_action_type"], "data_query")
+        self.assertIn("Revenue Per User", result["answer"])
+        self.assertTrue(result["requires_confirmation"])
+
+    def test_chat_follow_up_data_question_uses_session_context(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9},
+                    {
+                        "action": "propose_data_query",
+                        "answer": "",
+                        "payload": {"resolved_message": "RPU tháng 6 theo campaign bao nhiêu?"},
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+        )
+        self.teach_rpu(store)
+
+        first = store.chat(message="RPU là gì?", user_id="quynh", session_id="ctx-data")
+        result = store.chat(message="thế tháng 6 theo campaign bao nhiêu?", user_id="quynh", session_id="ctx-data")
+
+        self.assertEqual(first["status"], "answered")
+        self.assertEqual(result["intent"], "data_sql")
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertEqual(result["pending_action_type"], "data_query")
+        self.assertTrue(result["conversation_context_used"])
+        self.assertTrue(result["debug"]["conversation_history_used"])
+        self.assertGreaterEqual(result["debug"]["conversation_history_turns"], 2)
+        self.assertEqual(result["context_backend"], "local")
+        self.assertIn("RPU", result["resolved_question"])
+
+        confirmed = store.chat(
+            message="confirm",
+            user_id="quynh",
+            session_id="ctx-data",
+            pending_action_id=result["pending_action_id"],
+        )
+
+        self.assertEqual(confirmed["intent"], "data_sql")
+        self.assertEqual(confirmed["status"], "needs_dictionary")
+        self.assertIn("RPU", confirmed["question"])
+
+    def test_chat_follow_up_comparison_uses_session_context(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9},
+                    {
+                        "action": "answer_direct",
+                        "answer": "RPU dùng active users, còn ARPPU dùng paying users.",
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+        )
+        self.teach_rpu(store)
+        self.teach_arppu(store)
+
+        store.chat(message="RPU là gì?", user_id="quynh", session_id="ctx-compare")
+        result = store.chat(message="nó khác ARPPU thế nào?", user_id="quynh", session_id="ctx-compare")
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["intent"], "planner_answer")
+        self.assertTrue(result["conversation_context_used"])
+        self.assertTrue(result["debug"]["conversation_history_used"])
+        self.assertIn("ARPPU", result["answer"])
+        self.assertIn("paying users", result["answer"])
+
+    def test_chat_follow_up_without_session_context_asks_clarification(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "ask_clarification",
+                        "answer": "Bạn đang hỏi tiếp metric hoặc khái niệm nào?",
+                        "clarifying_questions": ["Bạn đang hỏi tiếp metric hoặc khái niệm nào?"],
+                        "confidence": 0.7,
+                    }
+                ]
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="thế tháng 6 theo campaign bao nhiêu?", user_id="quynh", session_id="new-session")
+
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertFalse(result["conversation_context_used"])
+        self.assertNotIn("RPU", result["resolved_question"])
+
+    def test_chat_planner_receives_conversation_history_from_session_mirror(self):
+        llm = CapturingPlannerLLM(plan={"action": "answer_direct", "answer": "ok", "confidence": 0.9})
+        store = self.make_store(llm_client=llm)
+
+        store.chat(message="Top route thực mua tháng 2 theo provider", user_id="quynh", session_id="history-pack")
+        store.chat(message="Tính theo transID", user_id="quynh", session_id="history-pack")
+
+        history = llm.planner_inputs[-1]["conversation_history"]
+        self.assertTrue(any(item["content"] == "Top route thực mua tháng 2 theo provider" for item in history))
+        self.assertTrue(any(item["content"] == "Tính theo transID" for item in history))
+        self.assertNotIn("recent_turns", llm.planner_inputs[-1])
+
+    def test_chat_hydrates_empty_local_history_from_agentbase_memory(self):
+        llm = CapturingPlannerLLM(plan={"action": "recall_conversation", "answer": "Câu đầu là: AOV là gì?", "confidence": 0.9})
+        store = self.make_store(
+            llm_client=llm,
+            chat_context_backend="agentbase",
+            chat_context_memory_id="mem-test",
+        )
+        memory = FakeMemoryEventStore(
+            events=[
+                {"role": "user", "content": "AOV là gì?", "created_at": "2026-06-12T00:00:00+00:00"},
+                {"role": "assistant", "content": "AOV là Average Order Value.", "created_at": "2026-06-12T00:00:01+00:00"},
+            ]
+        )
+        store._resolve_context_store = lambda *, user_id, session_id: ("agentbase", memory, "")
+
+        result = store.chat(
+            message="Câu đầu tiên tôi hỏi là gì?",
+            user_id="quynh",
+            session_id="hydrated-session",
+        )
+
+        self.assertEqual(result["status"], "answered")
+        self.assertTrue(result["debug"]["memory_hydrated"])
+        self.assertFalse(result["debug"]["memory_timeout"])
+        self.assertTrue(any(item["content"] == "AOV là gì?" for item in llm.planner_inputs[-1]["conversation_history"]))
+        self.assertTrue(any(item["role"] == "user" for item in memory.appended))
+        self.assertTrue(any(item["role"] == "assistant" for item in memory.appended))
+
+    def test_chat_memory_timeout_uses_session_mirror_without_hanging(self):
+        llm = CapturingPlannerLLM(plan={"action": "answer_direct", "answer": "ok", "confidence": 0.9})
+        store = self.make_store(
+            llm_client=llm,
+            chat_context_backend="agentbase",
+            chat_context_memory_id="mem-test",
+            chat_memory_timeout_ms=1,
+        )
+        memory = FakeMemoryEventStore(delay=0.05)
+        store._resolve_context_store = lambda *, user_id, session_id: ("agentbase", memory, "")
+
+        started = time.perf_counter()
+        result = store.chat(message="Bạn là ai?", user_id="quynh", session_id="timeout-session")
+        elapsed = time.perf_counter() - started
+
+        self.assertEqual(result["status"], "answered")
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(result["debug"]["memory_timeout"])
+        self.assertIn("timeout", " ".join(result["debug"].get("memory_errors", [])))
+        self.assertTrue(any(item["content"] == "Bạn là ai?" for item in llm.planner_inputs[-1]["conversation_history"]))
+
+    def test_chat_can_recall_first_question_in_session(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {"action": "answer_direct", "answer": "Mình chưa có đủ context.", "confidence": 0.5},
+                    {"action": "answer_direct", "answer": "Mình chưa có đủ context.", "confidence": 0.5},
+                    {
+                        "action": "recall_conversation",
+                        "answer": "Câu hỏi đầu tiên bạn gửi trong session này là: Doanh thu là gì nhỉ?",
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+        )
+
+        store.chat(message="Doanh thu là gì nhỉ?", user_id="quynhvm", session_id="test-001")
+        store.chat(message="Tổng tiền gọi là gì nhỉ?", user_id="quynhvm", session_id="test-001")
+
+        result = store.chat(
+            message="Bạn có biết câu hỏi đầu tiên mà tui gửi bạn là gì không?",
+            user_id="quynhvm",
+            session_id="test-001",
+        )
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["intent"], "conversation_recall")
+        self.assertIn("Doanh thu là gì nhỉ?", result["answer"])
+        self.assertFalse(result["requires_confirmation"])
+        self.assertTrue(result["conversation_context_used"])
+        self.assertTrue(result["debug"]["conversation_history_used"])
+
+    def test_chat_uses_llm_for_intent_and_answer_when_configured(self):
+        store = self.make_store(llm_client=FakeChatLLM(plans=[{"action": "answer_direct", "answer": "RPU là câu trả lời được viết bởi LLM.", "confidence": 0.9}]))
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU là gì?")
+
+        self.assertEqual(result["status"], "answered")
+        self.assertTrue(result["debug"]["llm_used"])
+        self.assertEqual(result["answer"], "RPU là câu trả lời được viết bởi LLM.")
+
+    def test_chat_general_help_answers_without_knowledge_lookup(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[{"action": "answer_direct", "answer": "Mình là business-knowledge-learning-agent.", "confidence": 0.9}]
+            )
+        )
+
+        result = store.chat(message="Bạn là ai?")
+
+        self.assertEqual(result["status"], "answered")
+        self.assertEqual(result["intent"], "planner_answer")
+        self.assertIn("business-knowledge-learning-agent", result["answer"])
+        self.assertEqual(result["used_knowledge_ids"], [])
+
+    def test_chat_can_teach_confirmed_knowledge(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "propose_teaching",
+                        "answer": "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ?",
+                        "payload": {"message": "AOV là Average Order Value, giá trị đơn hàng trung bình."},
+                        "confidence": 0.9,
+                    },
+                    {"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9},
+                    {
+                        "action": "propose_append_teaching",
+                        "answer": "Bạn confirm mình append nội dung này vào draft chứ?",
+                        "payload": {"message": "Công thức là total revenue / total orders. Chỉ tính đơn thành công."},
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+        )
+        self.teach_rpu(store)
+
+        proposed = store.chat(
+            message="AOV là Average Order Value, giá trị đơn hàng trung bình.",
+            user_id="quynh",
+            session_id="teach-chat-1",
+        )
+
+        self.assertEqual(proposed["intent"], "teach_knowledge")
+        self.assertEqual(proposed["status"], "needs_confirmation")
+        self.assertEqual(proposed["chat_session_id"], "teach-chat-1")
+        self.assertEqual(proposed["pending_action_type"], "start_teaching")
+        self.assertEqual(store.search_knowledge("AOV"), [])
+
+        started = store.chat(
+            message="confirm",
+            user_id="quynh",
+            session_id=proposed["chat_session_id"],
+            pending_action_id=proposed["pending_action_id"],
+        )
+
+        self.assertEqual(started["intent"], "teach_knowledge")
+        self.assertEqual(started["status"], "awaiting_confirmation")
+        self.assertTrue(started["session_id"].startswith("teach_"))
+        self.assertTrue(started["requires_confirmation"])
+        self.assertEqual(started["pending_action_type"], "commit_teaching")
+
+        asked = store.chat(message="RPU là gì?", user_id="quynh", session_id=proposed["chat_session_id"])
+
+        self.assertEqual(asked["status"], "answered")
+        self.assertEqual(asked["intent"], "planner_answer")
+        self.assertEqual(asked["session_state"], "teaching_draft_active")
+
+        appended = store.chat(
+            message="Công thức là total revenue / total orders. Chỉ tính đơn thành công.",
+            user_id="quynh",
+            session_id=proposed["chat_session_id"],
+        )
+
+        self.assertEqual(appended["intent"], "teach_knowledge")
+        self.assertEqual(appended["status"], "needs_confirmation")
+        self.assertEqual(appended["pending_action_type"], "append_teaching")
+
+        appended_confirmed = store.chat(
+            message="confirm",
+            user_id="quynh",
+            session_id=proposed["chat_session_id"],
+            pending_action_id=appended["pending_action_id"],
+        )
+
+        self.assertEqual(appended_confirmed["intent"], "teach_knowledge")
+        self.assertEqual(appended_confirmed["status"], "awaiting_confirmation")
+        self.assertEqual(appended_confirmed["pending_action_type"], "commit_teaching")
+
+        confirmed = store.chat(
+            message="confirm",
+            user_id="quynh",
+            session_id=proposed["chat_session_id"],
+            pending_action_id=appended_confirmed["pending_action_id"],
+        )
+
+        self.assertEqual(confirmed["intent"], "teach_knowledge")
+        self.assertEqual(confirmed["status"], "committed")
+        self.assertEqual(store.search_knowledge("AOV")[0]["name"], "AOV")
+
+    def test_chat_new_pending_replaces_previous_pending_action(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "propose_teaching",
+                        "answer": "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ?",
+                        "payload": {"message": "AOV là Average Order Value."},
+                        "confidence": 0.9,
+                    },
+                    {
+                        "action": "propose_data_query",
+                        "answer": "",
+                        "payload": {"resolved_message": "RPU tháng 6 theo campaign là bao nhiêu?"},
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+        )
+        self.teach_rpu(store)
+
+        teach = store.chat(message="AOV là Average Order Value.", session_id="mixed-session")
+        data = store.chat(message="RPU tháng 6 theo campaign là bao nhiêu?", session_id="mixed-session")
+
+        self.assertEqual(teach["pending_action_type"], "start_teaching")
+        self.assertEqual(data["pending_action_type"], "data_query")
+        self.assertNotEqual(teach["pending_action_id"], data["pending_action_id"])
+
+        session = store._get_or_create_chat_session(session_id="mixed-session", user_id="")
+        pending = store._pending_chat_actions(session)
+        self.assertEqual([action["id"] for action in pending], [data["pending_action_id"]])
+        old_action = session["pending_actions"][teach["pending_action_id"]]
+        self.assertEqual(old_action["status"], "cancelled")
+        self.assertEqual(old_action["cancel_reason"], "replaced_by_new_pending_action")
+
+        confirmed = store.chat(message="confirm", session_id="mixed-session")
+
+        self.assertEqual(confirmed["intent"], "data_sql")
+        self.assertNotEqual(confirmed["status"], "needs_clarification")
+
+    def test_chat_pending_status_uses_session_state_not_llm(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "propose_data_query",
+                        "answer": "",
+                        "payload": {"resolved_message": "Top route thực mua tháng 2 theo provider"},
+                        "confidence": 0.9,
+                    },
+                    {
+                        "action": "answer_direct",
+                        "answer": "LLM should not answer pending status.",
+                        "confidence": 0.9,
+                    },
+                ]
+            )
+        )
+
+        proposed = store.chat(message="Top route thực mua tháng 2 theo provider", session_id="pending-status")
+        status = store.chat(message="Có peding data nào đang chờ không?", session_id="pending-status")
+
+        self.assertEqual(proposed["pending_action_type"], "data_query")
+        self.assertEqual(status["intent"], "pending_status")
+        self.assertIn("Top route thực mua tháng 2 theo provider", status["answer"])
+        self.assertEqual(status["pending_action_id"], proposed["pending_action_id"])
+        self.assertFalse(status["debug"]["llm_used"])
+
+    def test_chat_cancel_clears_active_pending_action(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "propose_data_query",
+                        "answer": "",
+                        "payload": {"resolved_message": "Top route thực mua tháng 2 theo provider"},
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+
+        proposed = store.chat(message="Top route thực mua tháng 2 theo provider", session_id="cancel-pending")
+        cancelled = store.chat(message="cancel tất cả pending", session_id="cancel-pending")
+        status = store.chat(message="Có pending nào đang chờ không?", session_id="cancel-pending")
+
+        self.assertEqual(proposed["pending_action_type"], "data_query")
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["pending_action_id"], "")
+        self.assertEqual(status["intent"], "pending_status")
+        self.assertIn("Không có pending action", status["answer"])
+        self.assertEqual(status["session_state"], "idle")
 
 
 if __name__ == "__main__":

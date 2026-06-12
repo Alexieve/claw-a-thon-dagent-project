@@ -1,7 +1,10 @@
 import copy
 import json
 import os
+import queue
 import re
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +18,14 @@ except ImportError:  # pragma: no cover - optional dependency for JSON-only loca
     psycopg = None
     dict_row = None
 
+try:
+    from greennode_agentbase.memory import MemoryClient
+    from greennode_agentbase.memory.models import EventCreateRequest, EventPayload
+except ImportError:  # pragma: no cover - optional dependency for tests/system python
+    MemoryClient = None
+    EventCreateRequest = None
+    EventPayload = None
+
 
 DATA_DIR = Path(__file__).parent / "data"
 RAW_EVENTS_PATH = DATA_DIR / "raw_events.jsonl"
@@ -22,14 +33,261 @@ CANDIDATES_PATH = DATA_DIR / "knowledge_candidates.json"
 KNOWLEDGE_BASE_PATH = DATA_DIR / "knowledge_base.json"
 DOCUMENT_CHUNKS_PATH = DATA_DIR / "document_chunks.jsonl"
 TEACHING_SESSIONS_PATH = DATA_DIR / "teaching_sessions.json"
+CHAT_SESSIONS_PATH = DATA_DIR / "chat_sessions.json"
 DATA_DICTIONARY_PATH = DATA_DIR / "data_dictionary.json"
 QUESTION_EXAMPLES_PATH = DATA_DIR / "question_examples.json"
 SCHEMA_PATH = Path(__file__).parent / "db" / "schema.sql"
+RUNTIME_SKILLS_PATH = Path(__file__).parent / ".codex" / "skills"
 
 ACRONYM_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,9}\b")
 ALLOWED_KINDS = {"metric", "term", "dimension", "business_rule", "synonym"}
 ALLOWED_CANDIDATE_STATUSES = {"pending_review", "pending_change", "approved", "rejected", "conflict"}
-ALLOWED_TEACHING_SESSION_STATUSES = {"clarifying", "awaiting_confirmation", "committed", "pending_approval", "cancelled"}
+ALLOWED_TEACHING_SESSION_STATUSES = {
+    "awaiting_teach_confirmation",
+    "clarifying",
+    "awaiting_confirmation",
+    "committed",
+    "pending_approval",
+    "cancelled",
+}
+
+
+class SessionContextStoreError(RuntimeError):
+    pass
+
+
+def parse_skill_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end < 0:
+        return {}, text
+    raw = text[3:end].strip()
+    body = text[end + 4 :].lstrip()
+    metadata: dict[str, str] = {}
+    for line in raw.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        metadata[normalize_text(key)] = normalize_text(value).strip("\"'")
+    return metadata, body
+
+
+def extract_markdown_sections(body: str, section_names: list[str], *, max_chars: int) -> list[str]:
+    if not section_names:
+        return [body[:max_chars].strip()] if body.strip() else []
+    wanted = {normalize_lookup(name) for name in section_names}
+    lines = body.splitlines()
+    sections: list[str] = []
+    current_title = ""
+    current_lines: list[str] = []
+    for line in lines:
+        heading = re.match(r"^##\s+(.+?)\s*$", line)
+        if heading:
+            if normalize_lookup(current_title) in wanted and current_lines:
+                sections.append("\n".join(current_lines).strip())
+            current_title = normalize_text(heading.group(1))
+            current_lines = [line]
+            continue
+        if current_title:
+            current_lines.append(line)
+    if normalize_lookup(current_title) in wanted and current_lines:
+        sections.append("\n".join(current_lines).strip())
+    rendered = "\n\n".join(section for section in sections if section)
+    if rendered:
+        return [rendered[:max_chars].strip()]
+    return [body[:max_chars].strip()] if body.strip() else []
+
+
+class RuntimeSkillRegistry:
+    def __init__(self, skills_path: Path = RUNTIME_SKILLS_PATH) -> None:
+        self.skills_path = skills_path
+
+    def enabled_skills(self) -> list[dict[str, Any]]:
+        if not self.skills_path.exists():
+            return []
+        skills: list[dict[str, Any]] = []
+        for skill_file in sorted(self.skills_path.glob("*/SKILL.md")):
+            runtime_path = skill_file.parent / "runtime.json"
+            if not runtime_path.exists():
+                continue
+            try:
+                runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if runtime.get("enabled") is not True:
+                continue
+            try:
+                raw_skill = skill_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            frontmatter, body = parse_skill_frontmatter(raw_skill)
+            name = normalize_text(frontmatter.get("name")) or skill_file.parent.name
+            skills.append(
+                {
+                    "name": name,
+                    "description": normalize_text(frontmatter.get("description")),
+                    "path": str(skill_file),
+                    "runtime": runtime,
+                    "body": body,
+                }
+            )
+        return skills
+
+    def query_candidates(self, query: str, *, limit: int = 3) -> list[dict[str, Any]]:
+        cleaned_query = normalize_lookup(query)
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for skill in self.enabled_skills():
+            runtime = skill.get("runtime", {}) if isinstance(skill.get("runtime"), dict) else {}
+            haystack = normalize_lookup(
+                " ".join(
+                    [
+                        skill.get("name", ""),
+                        skill.get("description", ""),
+                        " ".join(runtime.get("trigger_terms", []) if isinstance(runtime.get("trigger_terms"), list) else []),
+                        " ".join(runtime.get("domains", []) if isinstance(runtime.get("domains"), list) else []),
+                        " ".join(runtime.get("tables", []) if isinstance(runtime.get("tables"), list) else []),
+                    ]
+                )
+            )
+            score = 0
+            for term in self._runtime_terms(runtime):
+                normalized = normalize_lookup(term)
+                if normalized and normalized in cleaned_query:
+                    score += 10
+                elif normalized and normalized in haystack and normalized in cleaned_query:
+                    score += 4
+            if not score and cleaned_query and any(word in haystack for word in cleaned_query.split()):
+                score = 1
+            if score > 0:
+                card = {
+                    "name": skill.get("name", ""),
+                    "description": skill.get("description", ""),
+                    "score": score,
+                    "matched_by": "runtime_metadata",
+                }
+                scored.append((score, {**skill, "card": card}))
+        return [item for _score, item in sorted(scored, key=lambda pair: (pair[0], pair[1].get("name", "")), reverse=True)[:limit]]
+
+    def skill_card(self, skill: dict[str, Any]) -> dict[str, Any]:
+        return copy.deepcopy(skill.get("card", {"name": skill.get("name", ""), "description": skill.get("description", ""), "score": 0}))
+
+    def skill_payload(self, skill: dict[str, Any]) -> dict[str, Any]:
+        runtime = skill.get("runtime", {}) if isinstance(skill.get("runtime"), dict) else {}
+        section_names = runtime.get("instruction_sections") if isinstance(runtime.get("instruction_sections"), list) else []
+        max_chars = int(runtime.get("max_instruction_chars") or 4000)
+        return {
+            "name": skill.get("name", ""),
+            "description": skill.get("description", ""),
+            "instructions": extract_markdown_sections(skill.get("body", ""), [str(item) for item in section_names], max_chars=max_chars),
+        }
+
+    def _runtime_terms(self, runtime: dict[str, Any]) -> list[str]:
+        terms: list[str] = []
+        for key in ["trigger_terms", "domains", "tables"]:
+            values = runtime.get(key)
+            if isinstance(values, list):
+                terms.extend(str(item) for item in values)
+        return unique_values(terms)
+
+
+class LocalChatSessionEventStore:
+    backend_name = "local"
+
+    def append_event(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        user_id: str,
+        session_id: str,
+        role: str,
+        content: str,
+    ) -> None:
+        if normalize_text(role) == "assistant":
+            chat_session.setdefault("messages", [])
+            chat_session["messages"].append({"role": "assistant", "content": normalize_text(content), "created_at": now_iso()})
+            chat_session["messages"] = chat_session["messages"][-20:]
+
+    def list_recent_events(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        user_id: str,
+        session_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        messages = chat_session.get("messages", []) if isinstance(chat_session.get("messages"), list) else []
+        return [
+            {
+                "role": normalize_text(message.get("role")),
+                "content": normalize_text(message.get("content")),
+                "created_at": normalize_text(message.get("created_at")),
+            }
+            for message in messages[-limit:]
+            if normalize_text(message.get("content"))
+        ]
+
+
+class AgentBaseMemoryEventStore:
+    backend_name = "agentbase"
+
+    def __init__(self, *, memory_id: str) -> None:
+        self.memory_id = normalize_text(memory_id)
+        self.client = MemoryClient() if MemoryClient is not None and self.memory_id else None
+
+    def append_event(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        user_id: str,
+        session_id: str,
+        role: str,
+        content: str,
+    ) -> None:
+        if not self.client or not EventCreateRequest or not EventPayload:
+            raise SessionContextStoreError("AgentBase Memory SDK chưa sẵn sàng.")
+        if not normalize_text(user_id) or not normalize_text(session_id):
+            raise SessionContextStoreError("Thiếu user_id hoặc session_id để ghi AgentBase Memory event.")
+        payload = EventPayload(type="conversational", role=normalize_text(role), message=normalize_text(content))
+        self.client.create_event(
+            id=self.memory_id,
+            actorId=normalize_text(user_id),
+            sessionId=normalize_text(session_id),
+            request=EventCreateRequest(payload=payload),
+        )
+
+    def list_recent_events(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        user_id: str,
+        session_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not self.client:
+            raise SessionContextStoreError("AgentBase Memory SDK chưa sẵn sàng.")
+        result = self.client.list_events(
+            id=self.memory_id,
+            actorId=normalize_text(user_id),
+            sessionId=normalize_text(session_id),
+            page=1,
+            size=max(1, limit),
+        )
+        items = getattr(result, "list_data", None) or getattr(result, "listData", None) or []
+        events = []
+        for item in reversed(items):
+            payload = getattr(item, "payload", None)
+            message = normalize_text(getattr(payload, "message", "") if payload else "")
+            if not message:
+                continue
+            events.append(
+                {
+                    "role": normalize_text(getattr(payload, "role", "") if payload else ""),
+                    "content": message,
+                    "created_at": normalize_text(getattr(item, "event_timestamp", "") or getattr(item, "eventTimestamp", "")),
+                }
+            )
+        return events[-limit:]
 
 
 def now_iso() -> str:
@@ -46,6 +304,19 @@ def normalize_text(value: Any) -> str:
 
 def normalize_lookup(value: Any) -> str:
     return normalize_text(value).casefold()
+
+
+def parse_bool_flag(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = normalize_lookup(value)
+    if normalized in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off", "disable", "disabled"}:
+        return False
+    return default
 
 
 def extract_acronyms(text: str) -> list[str]:
@@ -86,6 +357,10 @@ def empty_knowledge_base() -> dict[str, Any]:
 
 
 def empty_teaching_sessions() -> dict[str, Any]:
+    return {"schema_version": 1, "sessions": {}}
+
+
+def empty_chat_sessions() -> dict[str, Any]:
     return {"schema_version": 1, "sessions": {}}
 
 
@@ -177,6 +452,80 @@ def candidate_template(
         "conflict_with": "",
         "created_at": now_iso(),
     }
+
+
+class AgentLLMClient:
+    def __init__(self) -> None:
+        self.api_key = os.getenv("LLM_API_KEY", "")
+        self.base_url = os.getenv("LLM_BASE_URL", "").rstrip("/")
+        self.model = os.getenv("LLM_MODEL", "")
+
+    def configured(self) -> bool:
+        return bool(self.api_key and self.base_url and self.model)
+
+    def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0,
+    ) -> dict[str, Any] | None:
+        raw = self._complete(system=system, user=user, temperature=temperature, response_format={"type": "json_object"})
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def complete_text(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+    ) -> str:
+        return self._complete(system=system, user=user, temperature=temperature) or ""
+
+    def _complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float,
+        response_format: dict[str, Any] | None = None,
+    ) -> str:
+        if not self.configured():
+            return ""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "temperature": temperature,
+        }
+        if response_format:
+            payload["response_format"] = response_format
+
+        req = request.Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with request.urlopen(req, timeout=30) as response:
+                raw = response.read().decode("utf-8")
+            data = json.loads(raw)
+            content = data["choices"][0]["message"]["content"]
+        except (error.URLError, TimeoutError, ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+            return ""
+        return normalize_text(content)
 
 
 class KnowledgeParser:
@@ -513,6 +862,21 @@ class PostgresStorage:
                     self._upsert_teaching_session(cur, session)
             conn.commit()
 
+    def load_chat_sessions(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("select payload from chat_sessions")
+                rows = cur.fetchall()
+        return {"schema_version": 1, "sessions": {row["payload"]["id"]: row["payload"] for row in rows}}
+
+    def save_chat_sessions(self, data: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("delete from chat_sessions")
+                for session in data.get("sessions", {}).values():
+                    self._upsert_chat_session(cur, session)
+            conn.commit()
+
     def load_data_dictionary(self) -> dict[str, Any]:
         with self._connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
@@ -556,7 +920,7 @@ class PostgresStorage:
             conn.commit()
 
     def _connect(self):
-        return psycopg.connect(self.database_url)
+        return psycopg.connect(self.database_url, prepare_threshold=None)
 
     def _upsert_knowledge(self, cur, record: dict[str, Any]) -> None:
         cur.execute(
@@ -631,6 +995,29 @@ class PostgresStorage:
                 session.get("team", ""),
                 session.get("owner", ""),
                 session.get("created_at") or now_iso(),
+                session.get("updated_at") or now_iso(),
+                json.dumps(session, ensure_ascii=False),
+            ),
+        )
+
+    def _upsert_chat_session(self, cur, session: dict[str, Any]) -> None:
+        cur.execute(
+            """
+            insert into chat_sessions
+              (id, state, user_id, active_teaching_session_id, updated_at, payload)
+            values (%s, %s, %s, %s, %s::timestamptz, %s::jsonb)
+            on conflict (id) do update set
+              state = excluded.state,
+              user_id = excluded.user_id,
+              active_teaching_session_id = excluded.active_teaching_session_id,
+              updated_at = excluded.updated_at,
+              payload = excluded.payload
+            """,
+            (
+                session["id"],
+                session.get("state", "idle"),
+                session.get("user_id", ""),
+                session.get("active_teaching_session_id") or "",
                 session.get("updated_at") or now_iso(),
                 json.dumps(session, ensure_ascii=False),
             ),
@@ -730,21 +1117,58 @@ class KnowledgeStore:
         knowledge_base_path: Path | str = KNOWLEDGE_BASE_PATH,
         document_chunks_path: Path | str = DOCUMENT_CHUNKS_PATH,
         teaching_sessions_path: Path | str = TEACHING_SESSIONS_PATH,
+        chat_sessions_path: Path | str = CHAT_SESSIONS_PATH,
         data_dictionary_path: Path | str = DATA_DICTIONARY_PATH,
         question_examples_path: Path | str = QUESTION_EXAMPLES_PATH,
         database_url: str | None = None,
         parser: KnowledgeParser | None = None,
+        llm_client: Any | None = None,
+        chat_context_backend: str | None = None,
+        chat_context_memory_id: str | None = None,
+        chat_context_event_limit: int | None = None,
+        chat_context_fallback_on_error: bool | None = None,
+        runtime_skills_enabled: bool | None = None,
+        chat_memory_timeout_ms: int | None = None,
+        chat_history_turn_limit: int | None = None,
+        chat_memory_hydrate_when_empty: bool | None = None,
     ) -> None:
         self.raw_events_path = Path(raw_events_path)
         self.candidates_path = Path(candidates_path)
         self.knowledge_base_path = Path(knowledge_base_path)
         self.document_chunks_path = Path(document_chunks_path)
         self.teaching_sessions_path = Path(teaching_sessions_path)
+        self.chat_sessions_path = Path(chat_sessions_path)
         self.data_dictionary_path = Path(data_dictionary_path)
         self.question_examples_path = Path(question_examples_path)
         self.database_url = normalize_text(database_url if database_url is not None else os.getenv("DATABASE_URL"))
         self.db = PostgresStorage(self.database_url) if self.database_url else None
         self.parser = parser or KnowledgeParser()
+        self.llm_client = llm_client or AgentLLMClient()
+        self.chat_context_backend = normalize_lookup(chat_context_backend if chat_context_backend is not None else os.getenv("CHAT_CONTEXT_BACKEND") or "auto")
+        if self.chat_context_backend not in {"agentbase", "local", "auto"}:
+            self.chat_context_backend = "auto"
+        self.chat_context_memory_id = normalize_text(
+            chat_context_memory_id if chat_context_memory_id is not None else os.getenv("CHAT_CONTEXT_MEMORY_ID")
+        )
+        self.chat_context_event_limit = chat_context_event_limit or int(os.getenv("CHAT_CONTEXT_EVENT_LIMIT") or "12")
+        fallback_env = os.getenv("CHAT_CONTEXT_FALLBACK_ON_MEMORY_ERROR")
+        self.chat_context_fallback_on_error = (
+            chat_context_fallback_on_error
+            if chat_context_fallback_on_error is not None
+            else normalize_lookup(fallback_env or "true") not in {"0", "false", "no"}
+        )
+        self.runtime_skills_enabled = parse_bool_flag(
+            runtime_skills_enabled if runtime_skills_enabled is not None else os.getenv("CHAT_RUNTIME_SKILLS_ENABLED"),
+            default=True,
+        )
+        self.chat_memory_timeout_ms = chat_memory_timeout_ms or int(os.getenv("CHAT_MEMORY_TIMEOUT_MS") or "1500")
+        self.chat_history_turn_limit = chat_history_turn_limit or int(os.getenv("CHAT_HISTORY_TURN_LIMIT") or "12")
+        self.chat_memory_hydrate_when_empty = parse_bool_flag(
+            chat_memory_hydrate_when_empty
+            if chat_memory_hydrate_when_empty is not None
+            else os.getenv("CHAT_MEMORY_HYDRATE_WHEN_EMPTY"),
+            default=True,
+        )
 
     def bootstrap(self) -> None:
         if self.db:
@@ -761,6 +1185,8 @@ class KnowledgeStore:
             self.document_chunks_path.write_text("", encoding="utf-8")
         if not self.teaching_sessions_path.exists():
             self._save_json(self.teaching_sessions_path, empty_teaching_sessions())
+        if not self.chat_sessions_path.exists():
+            self._save_json(self.chat_sessions_path, empty_chat_sessions())
         if not self.data_dictionary_path.exists():
             self._save_json(self.data_dictionary_path, empty_data_dictionary())
         if not self.question_examples_path.exists():
@@ -799,6 +1225,10 @@ class KnowledgeStore:
         return {
             "backend": "postgres" if self.db else "json",
             "database_configured": bool(self.db),
+            "chat_context_backend": self.chat_context_backend,
+            "chat_context_memory_configured": bool(self.chat_context_memory_id),
+            "chat_context_event_limit": self.chat_context_event_limit,
+            "chat_context_fallback_on_memory_error": self.chat_context_fallback_on_error,
         }
 
     def teach_text(
@@ -1193,8 +1623,11 @@ class KnowledgeStore:
                     " ".join(example.get("used_tables", [])),
                 ]
             )
-            if not normalized_query or normalized_query in normalize_lookup(haystack):
-                matches.append(copy.deepcopy(example))
+            normalized_haystack = normalize_lookup(haystack)
+            if not normalized_query or normalized_query in normalized_haystack:
+                item = copy.deepcopy(example)
+                item["_match_score"] = 100 if normalized_query else 0
+                matches.append(item)
                 continue
             example_terms = {normalize_lookup(term) for term in self._extract_question_terms(haystack)}
             overlap = [term for term in query_terms if normalize_lookup(term) in example_terms]
@@ -1203,6 +1636,99 @@ class KnowledgeStore:
                 item["_match_score"] = len(overlap)
                 matches.append(item)
         return sorted(matches, key=lambda item: (int(item.get("_match_score") or 0), item.get("updated_at", "")), reverse=True)
+
+    def chat(
+        self,
+        *,
+        message: str,
+        user_id: str = "",
+        session_id: str = "",
+        pending_action_id: str = "",
+        debug_context: bool = False,
+        use_runtime_skills: bool | None = None,
+    ) -> dict[str, Any]:
+        total_started = time.perf_counter()
+        latency: dict[str, float] = {}
+        cleaned = normalize_text(message)
+        if not cleaned:
+            raise ValueError("Thiếu message")
+
+        chat_session = self._get_or_create_chat_session(session_id=session_id, user_id=user_id)
+        had_local_messages = bool(chat_session.get("messages"))
+        chat_session["_debug_context"] = bool(debug_context)
+        chat_session["_use_runtime_skills"] = parse_bool_flag(use_runtime_skills, default=self.runtime_skills_enabled)
+        chat_session["_latency_ms"] = latency
+        chat_session["_chat_started_at"] = total_started
+        chat_session["_memory_hydrate_needed"] = not had_local_messages
+        self._append_chat_message(chat_session, role="user", content=cleaned)
+        effective_user_id = normalize_text(user_id) or chat_session.get("user_id", "")
+        effective_session_id = chat_session["id"]
+        chat_session["_context_user_id"] = effective_user_id
+        chat_session["_context_session_id"] = effective_session_id
+
+        confirmation_result = self._handle_chat_confirmation(
+            chat_session=chat_session,
+            message=cleaned,
+            pending_action_id=pending_action_id,
+        )
+        if confirmation_result:
+            self._record_chat_total_latency(chat_session)
+            self._save_chat_session(chat_session)
+            return confirmation_result
+
+        pending_status_result = self._handle_pending_status_query(chat_session=chat_session, message=cleaned)
+        if pending_status_result:
+            self._record_chat_total_latency(chat_session)
+            self._save_chat_session(chat_session)
+            return pending_status_result
+
+        refinement_result = self._handle_pending_action_refinement(
+            chat_session=chat_session,
+            message=cleaned,
+        )
+        if refinement_result:
+            self._record_chat_total_latency(chat_session)
+            self._save_chat_session(chat_session)
+            return refinement_result
+
+        memory_started = time.perf_counter()
+        conversation_context = self._build_conversation_context(
+            chat_session=chat_session,
+            message=cleaned,
+            user_id=effective_user_id,
+            session_id=effective_session_id,
+        )
+        latency["memory"] = self._elapsed_ms(memory_started)
+        chat_session["_conversation_context"] = conversation_context
+
+        retrieval_started = time.perf_counter()
+        context = self._build_chat_context(cleaned, conversation_context=conversation_context)
+        context["_runtime_skills_enabled"] = bool(chat_session.get("_use_runtime_skills", self.runtime_skills_enabled))
+        latency["retrieval"] = self._elapsed_ms(retrieval_started)
+        if not self._llm_configured():
+            result = self._llm_required_chat_response(chat_session=chat_session, message=cleaned)
+            self._record_chat_total_latency(chat_session)
+            self._save_chat_session(chat_session)
+            return result
+
+        plan = self._plan_chat_action(
+            chat_session=chat_session,
+            raw_message=cleaned,
+            context=context,
+            conversation_context=conversation_context,
+        )
+        execute_started = time.perf_counter()
+        result = self._execute_planned_chat_action(
+            chat_session=chat_session,
+            raw_message=cleaned,
+            context=context,
+            conversation_context=conversation_context,
+            plan=plan,
+        )
+        latency["execute"] = self._elapsed_ms(execute_started)
+        self._record_chat_total_latency(chat_session)
+        self._save_chat_session(chat_session)
+        return result
 
     def ask_data_question(self, question: str) -> dict[str, Any]:
         cleaned = normalize_text(question)
@@ -1213,7 +1739,7 @@ class KnowledgeStore:
         known = analysis["known"]
         detected_concepts = unique_values([*analysis["detected_terms"], *self._extract_question_terms(cleaned)])
         missing_knowledge = analysis["unknown"]
-        dictionary_matches = self.search_data_dictionary(cleaned)
+        dictionary_matches = self._search_dictionary_for_question(cleaned, known)
         example_matches = self.search_question_examples(cleaned)
 
         if missing_knowledge:
@@ -1235,15 +1761,15 @@ class KnowledgeStore:
                 "answer": "Tôi chưa đủ Domain Knowledge để hiểu câu hỏi này.",
             }
 
-        if not dictionary_matches:
-            missing = self._build_missing_dictionary_items(cleaned, known, detected_concepts)
+        missing_dictionary = self._build_missing_dictionary_items(cleaned, known, detected_concepts, dictionary_matches)
+        if missing_dictionary:
             return {
                 "status": "needs_dictionary",
                 "question": cleaned,
                 "detected_concepts": detected_concepts,
                 "known_knowledge": known,
-                "missing": missing,
-                "dictionary": [],
+                "missing": missing_dictionary,
+                "dictionary": dictionary_matches,
                 "examples": example_matches,
                 "answer": "Tôi đã tìm được knowledge nghiệp vụ liên quan, nhưng chưa đủ data dictionary để sinh SQL.",
             }
@@ -1263,6 +1789,40 @@ class KnowledgeStore:
                 "dictionary": dictionary_matches,
                 "examples": example_matches,
                 "answer": "Tôi tìm được question example phù hợp và tạo SQL draft từ example đã approved.",
+            }
+
+        llm_sql = self._build_llm_sql_draft(cleaned, known, dictionary_matches)
+        if llm_sql:
+            return {
+                "status": "sql_draft",
+                "question": cleaned,
+                "detected_concepts": detected_concepts,
+                "sql": llm_sql["sql"],
+                "explanation": llm_sql.get("explanation", []),
+                "used_knowledge_ids": [item["id"] for item in known],
+                "used_dictionary_ids": [item["id"] for item in dictionary_matches],
+                "used_example_ids": [],
+                "knowledge": known,
+                "dictionary": dictionary_matches,
+                "examples": [],
+                "answer": llm_sql.get("answer") or "Tôi đã tạo SQL draft từ context retrieved.",
+            }
+
+        sql = self._build_deterministic_sql_draft(cleaned, known, dictionary_matches, detected_concepts)
+        if sql:
+            return {
+                "status": "sql_draft",
+                "question": cleaned,
+                "detected_concepts": detected_concepts,
+                "sql": sql,
+                "explanation": self._build_sql_explanation(known, dictionary_matches, {}),
+                "used_knowledge_ids": [item["id"] for item in known],
+                "used_dictionary_ids": [item["id"] for item in dictionary_matches],
+                "used_example_ids": [],
+                "knowledge": known,
+                "dictionary": dictionary_matches,
+                "examples": [],
+                "answer": "Tôi đã tạo SQL draft từ Domain Knowledge và Data Dictionary đã approved.",
             }
 
         return {
@@ -1712,6 +2272,1905 @@ class KnowledgeStore:
             "updated_at": normalize_text(example.get("updated_at")) or now_iso(),
         }
 
+    def _llm_configured(self) -> bool:
+        configured = getattr(self.llm_client, "configured", None)
+        return bool(configured()) if callable(configured) else False
+
+    def _build_chat_context(self, message: str, conversation_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        knowledge = self._search_knowledge_for_chat(message)
+        dictionary = self._search_dictionary_for_chat(message, knowledge)
+        if not dictionary:
+            dictionary = self.search_data_dictionary(message)[:5]
+        return {
+            "knowledge": knowledge[:6],
+            "dictionary": dictionary[:6],
+            "examples": self.search_question_examples(message)[:5],
+            "conversation_context": conversation_context or {},
+        }
+
+    def _llm_required_chat_response(self, *, chat_session: dict[str, Any], message: str) -> dict[str, Any]:
+        response = {
+            "status": "llm_required",
+            "intent": "llm_required",
+            "answer": (
+                "Chat tự nhiên hiện yêu cầu LLM planner. Bạn cần cấu hình LLM_API_KEY, "
+                "LLM_BASE_URL và LLM_MODEL để agent có thể tự hiểu ngữ cảnh và route câu trả lời."
+            ),
+            "question": message,
+            "missing": [
+                {
+                    "type": "llm_config",
+                    "concept": "chat_planner",
+                    "question": "Cần cấu hình LLM để dùng chat tự nhiên.",
+                }
+            ],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {
+                "llm_used": False,
+                "fallback_used": False,
+                "planner_used": False,
+                "planner_fallback_reason": "llm_not_configured",
+            },
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+    def _plan_chat_action(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        raw_message: str,
+        context: dict[str, Any],
+        conversation_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        compact_input = self._build_chat_planner_input(
+            chat_session=chat_session,
+            raw_message=raw_message,
+            context=context,
+            conversation_context=conversation_context,
+        )
+        system = (
+            "You are the LLM action planner for a Vietnamese business data agent. "
+            "Return only JSON. Choose the next assistant action naturally from the user's message and context. "
+            "Allowed actions: answer_direct, ask_clarification, propose_teaching, propose_append_teaching, "
+            "propose_commit_teaching, propose_data_query, answer_and_propose_data_query, refine_pending_action, recall_conversation, noop. "
+            "Pure definition/help/recall can be answered directly. Teaching, appending, committing, SQL/data query, "
+            "or any KB/data side effect must require confirmation and must be proposed as a pending action. "
+            "Use only retrieved knowledge/dictionary/examples. Do not invent metric definitions, tables, columns, or SQL. "
+            "If runtime_skills are present in the input, follow those instructions as domain-specific behavior rules. "
+            "For data questions, propose a data query; Python will run guarded data flow only after user confirmation. "
+            "If the user message is a short follow-up and a pending action is relevant, refine that pending action instead of treating the message as a new standalone question. "
+            "Output fields: action, answer, requires_confirmation, pending_action_type, payload, clarifying_questions, "
+            "confidence, used_context_terms, reasoning_summary."
+        )
+        planner_started = time.perf_counter()
+        parsed = self.llm_client.complete_json(
+            system=system,
+            user=json.dumps(compact_input, ensure_ascii=False),
+            temperature=0,
+        )
+        self._record_chat_latency(chat_session, "planner", planner_started)
+        if not isinstance(parsed, dict):
+            parsed = {}
+        allowed = {
+            "answer_direct",
+            "ask_clarification",
+            "propose_teaching",
+            "propose_append_teaching",
+            "propose_commit_teaching",
+            "propose_data_query",
+            "answer_and_propose_data_query",
+            "refine_pending_action",
+            "recall_conversation",
+            "noop",
+        }
+        action = normalize_lookup(parsed.get("action"))
+        if action not in allowed:
+            parsed = {
+                "action": "ask_clarification",
+                "answer": "Mình chưa chắc nên xử lý câu này theo hướng nào. Bạn muốn hỏi định nghĩa, dạy knowledge, hay chuẩn bị query data?",
+                "requires_confirmation": False,
+                "confidence": 0,
+                "planner_fallback_reason": "invalid_planner_action",
+            }
+        parsed["action"] = normalize_lookup(parsed.get("action")) or "ask_clarification"
+        if not isinstance(parsed.get("payload"), dict):
+            parsed["payload"] = {}
+        if not isinstance(parsed.get("clarifying_questions"), list):
+            parsed["clarifying_questions"] = []
+        if not isinstance(parsed.get("used_context_terms"), list):
+            parsed["used_context_terms"] = []
+        parsed["_runtime_skills_used"] = [item.get("name", "") for item in compact_input.get("runtime_skills", []) if item.get("name")]
+        parsed["_runtime_skill_candidates"] = compact_input.get("runtime_skill_candidates", [])
+        parsed["_runtime_skill_selection_reason"] = compact_input.get("runtime_skill_selection_reason", "")
+        parsed["_runtime_skills_enabled"] = bool(context.get("_runtime_skills_enabled", True))
+        return parsed
+
+    def _build_chat_planner_input(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        raw_message: str,
+        context: dict[str, Any],
+        conversation_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        skill_started = time.perf_counter()
+        runtime_skills = self._runtime_chat_skills(raw_message=raw_message, context=context)
+        self._record_chat_latency(chat_session, "skill_select", skill_started)
+        runtime_skill_candidates = context.get("_runtime_skill_candidates", [])
+        runtime_skill_selection_reason = context.get("_runtime_skill_selection_reason", "")
+        pending_actions = [
+            self._pending_action_planner_summary(action)
+            for action in self._pending_chat_actions(chat_session)
+        ]
+        active_teaching = {}
+        teaching_session_id = chat_session.get("active_teaching_session_id", "")
+        if teaching_session_id:
+            try:
+                teaching = self.summarize_teach_session(session_id=teaching_session_id)
+                active_teaching = {
+                    "session_id": teaching_session_id,
+                    "status": teaching.get("status"),
+                    "summary": teaching.get("summary", {}),
+                    "draft": teaching.get("draft", {}),
+                }
+            except ValueError:
+                active_teaching = {"session_id": teaching_session_id, "status": "missing"}
+        return {
+            "raw_message": raw_message,
+            "conversation_history": conversation_context.get("conversation_history", []),
+            "memory": {
+                "backend": conversation_context.get("backend"),
+                "hydrated": conversation_context.get("memory_hydrated", False),
+                "sync_status": conversation_context.get("memory_sync_status", ""),
+                "timeout": conversation_context.get("memory_timeout", False),
+                "context_terms": conversation_context.get("context_terms", []),
+            },
+            "active_teaching": active_teaching,
+            "pending_actions": pending_actions,
+            "retrieved": {
+                "knowledge": [self._compact_planner_knowledge(item) for item in context.get("knowledge", [])],
+                "dictionary": [self._compact_planner_dictionary(item) for item in context.get("dictionary", [])],
+                "examples": [self._compact_planner_example(item) for item in context.get("examples", [])],
+            },
+            "runtime_skill_candidates": runtime_skill_candidates,
+            "runtime_skill_selection_reason": runtime_skill_selection_reason,
+            "runtime_skills": runtime_skills,
+            "safety_policy": {
+                "no_confirmation_needed": ["answer_direct", "ask_clarification", "recall_conversation"],
+                "confirmation_required": [
+                    "propose_teaching",
+                    "propose_append_teaching",
+                    "propose_commit_teaching",
+                    "propose_data_query",
+                    "answer_and_propose_data_query",
+                    "refine_pending_action",
+                ],
+                "data_rule": "Never draft SQL or query data before user confirms the pending data_query action.",
+            },
+        }
+
+    def _runtime_chat_skills(self, *, raw_message: str, context: dict[str, Any]) -> list[dict[str, Any]]:
+        if context.get("_runtime_skills_enabled") is False:
+            context["_runtime_skill_candidates"] = []
+            context["_runtime_skill_selection_reason"] = "runtime skills disabled by request/config"
+            return []
+        registry = RuntimeSkillRegistry()
+        skill_query = self._runtime_skill_query(raw_message=raw_message, context=context)
+        candidates = registry.query_candidates(skill_query)
+        cards = [registry.skill_card(skill) for skill in candidates]
+        selected_names, reason = self._auto_select_runtime_skill_names(cards)
+        if not selected_names and cards:
+            selected_names, reason = self._select_runtime_skill_names(raw_message=raw_message, context=context, skill_cards=cards)
+        context["_runtime_skill_candidates"] = cards
+        context["_runtime_skill_selection_reason"] = reason
+        return [registry.skill_payload(skill) for skill in candidates if skill.get("name") in selected_names]
+
+    def _auto_select_runtime_skill_names(self, skill_cards: list[dict[str, Any]]) -> tuple[list[str], str]:
+        if len(skill_cards) != 1:
+            return [], ""
+        card = skill_cards[0]
+        name = normalize_text(card.get("name"))
+        try:
+            score = int(card.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        if name == "air-sql-analyst" and score >= 20:
+            return [name], "auto-selected high-score runtime skill candidate"
+        return [], ""
+
+    def _runtime_skill_query(self, *, raw_message: str, context: dict[str, Any]) -> str:
+        parts = [
+            raw_message,
+            *[item.get("domain", "") for item in context.get("knowledge", [])],
+            *[item.get("name", "") for item in context.get("knowledge", [])],
+            *[item.get("table", "") for item in context.get("dictionary", [])],
+            *[" ".join(column.get("name", "") for column in item.get("columns", [])) for item in context.get("dictionary", [])],
+            *[" ".join(item.get("used_tables", [])) for item in context.get("examples", [])],
+            *[" ".join(item.get("concepts", [])) for item in context.get("examples", [])],
+        ]
+        return normalize_text(" ".join(parts))
+
+    def _select_runtime_skill_names(
+        self,
+        *,
+        raw_message: str,
+        context: dict[str, Any],
+        skill_cards: list[dict[str, Any]],
+    ) -> tuple[list[str], str]:
+        if not skill_cards:
+            return [], ""
+        parsed = self.llm_client.complete_json(
+            system=(
+                "You select runtime skills for a business-data chat planner. Return only JSON with "
+                "selected_skills as an array of skill names from the candidates, and reason as a short string. "
+                "Select a skill only if its description is relevant to the user message and retrieved context."
+            ),
+            user=json.dumps(
+                {
+                    "message": raw_message,
+                    "retrieved": {
+                        "knowledge_names": [item.get("name", "") for item in context.get("knowledge", [])],
+                        "knowledge_domains": [item.get("domain", "") for item in context.get("knowledge", [])],
+                        "dictionary_tables": [item.get("table", "") for item in context.get("dictionary", [])],
+                        "example_tables": [table for item in context.get("examples", []) for table in item.get("used_tables", [])],
+                        "example_concepts": [concept for item in context.get("examples", []) for concept in item.get("concepts", [])],
+                    },
+                    "candidates": skill_cards,
+                },
+                ensure_ascii=False,
+            ),
+            temperature=0,
+        )
+        valid_names = {card.get("name", "") for card in skill_cards}
+        selected = parsed.get("selected_skills") if isinstance(parsed, dict) else []
+        if not isinstance(selected, list):
+            selected = []
+        selected_names = unique_values([str(item) for item in selected if str(item) in valid_names])
+        reason = normalize_text(parsed.get("reason")) if isinstance(parsed, dict) else ""
+        return selected_names, reason
+
+    def _execute_planned_chat_action(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        raw_message: str,
+        context: dict[str, Any],
+        conversation_context: dict[str, Any],
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        action = normalize_lookup(plan.get("action"))
+        payload = plan.get("payload", {}) if isinstance(plan.get("payload"), dict) else {}
+        planner_answer = normalize_text(plan.get("answer"))
+        debug = self._planner_debug(plan)
+
+        if action == "answer_direct":
+            response = {
+                "status": "answered",
+                "intent": "planner_answer",
+                "answer": planner_answer or "Mình chưa có câu trả lời đủ rõ từ context hiện tại.",
+                "question": raw_message,
+                "missing": [],
+                "used_knowledge_ids": [item["id"] for item in context.get("knowledge", [])],
+                "used_dictionary_ids": [item["id"] for item in context.get("dictionary", [])],
+                "used_example_ids": [item["id"] for item in context.get("examples", [])],
+                "debug": debug,
+            }
+            self._attach_debug_context(response, context=context, chat_session=chat_session)
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+        if action == "recall_conversation":
+            response = {
+                "status": "answered",
+                "intent": "conversation_recall",
+                "answer": planner_answer or "Mình chưa thấy đủ lịch sử trong session này để trả lời chắc chắn.",
+                "question": raw_message,
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": debug,
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+        if action == "ask_clarification" or action == "noop":
+            questions = [normalize_text(item) for item in plan.get("clarifying_questions", []) if normalize_text(item)]
+            answer = planner_answer or (questions[0] if questions else "Bạn nói rõ hơn một chút để mình xử lý đúng hướng nhé.")
+            response = {
+                "status": "needs_clarification",
+                "intent": "clarification",
+                "answer": answer,
+                "question": raw_message,
+                "missing": [
+                    {
+                        "type": "clarification",
+                        "concept": raw_message,
+                        "question": question,
+                    }
+                    for question in (questions or [answer])
+                ],
+                "used_knowledge_ids": [item["id"] for item in context.get("knowledge", [])],
+                "used_dictionary_ids": [item["id"] for item in context.get("dictionary", [])],
+                "used_example_ids": [item["id"] for item in context.get("examples", [])],
+                "debug": debug,
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+        if action == "refine_pending_action":
+            pending_action_id = normalize_text(payload.get("pending_action_id"))
+            refinement = normalize_text(payload.get("refined_message") or payload.get("message")) or raw_message
+            return self._refine_pending_data_query_action(
+                chat_session=chat_session,
+                message=refinement,
+                pending_action_id=pending_action_id,
+                planner_answer=planner_answer,
+                planner_debug=debug,
+            )
+
+        if action == "propose_data_query":
+            return self._propose_data_query_action(
+                chat_session=chat_session,
+                message=normalize_text(payload.get("resolved_message")) or raw_message,
+                raw_message=raw_message,
+                context=context,
+                conversation_context=conversation_context,
+                llm_used=True,
+                planner_answer=planner_answer,
+                planner_debug=debug,
+            )
+
+        if action == "answer_and_propose_data_query":
+            return self._propose_data_query_action(
+                chat_session=chat_session,
+                message=normalize_text(payload.get("resolved_message")) or raw_message,
+                raw_message=raw_message,
+                context=context,
+                conversation_context=conversation_context,
+                llm_used=True,
+                planner_answer=planner_answer,
+                planner_debug=debug,
+            )
+
+        if action == "propose_teaching":
+            return self._propose_teaching_action(
+                chat_session=chat_session,
+                message=normalize_text(payload.get("message")) or raw_message,
+                llm_used=True,
+                planner_answer=planner_answer,
+                planner_debug=debug,
+            )
+
+        if action == "propose_append_teaching":
+            if not chat_session.get("active_teaching_session_id"):
+                response = {
+                    "status": "needs_clarification",
+                    "intent": "clarification",
+                    "answer": planner_answer or "Mình chưa thấy draft teaching nào đang active để append. Bạn muốn bắt đầu teaching session mới không?",
+                    "question": raw_message,
+                    "missing": [],
+                    "used_knowledge_ids": [],
+                    "used_dictionary_ids": [],
+                    "used_example_ids": [],
+                    "debug": {**debug, "planner_fallback_reason": "append_without_active_teaching"},
+                }
+                return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+            return self._propose_append_teaching_action(
+                chat_session=chat_session,
+                message=normalize_text(payload.get("message")) or raw_message,
+                llm_used=True,
+                planner_answer=planner_answer,
+                planner_debug=debug,
+            )
+
+        if action == "propose_commit_teaching":
+            teaching_session_id = chat_session.get("active_teaching_session_id", "")
+            if not teaching_session_id:
+                response = {
+                    "status": "needs_clarification",
+                    "intent": "clarification",
+                    "answer": planner_answer or "Mình chưa thấy draft teaching nào đang active để commit.",
+                    "question": raw_message,
+                    "missing": [],
+                    "used_knowledge_ids": [],
+                    "used_dictionary_ids": [],
+                    "used_example_ids": [],
+                    "debug": {**debug, "planner_fallback_reason": "commit_without_active_teaching"},
+                }
+                return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+            action_record = self._create_commit_teaching_action(chat_session, teaching_session_id=teaching_session_id)
+            response = {
+                "status": "needs_confirmation",
+                "intent": "teach_knowledge",
+                "answer": planner_answer or "Bạn confirm mình ghi draft teaching này vào KB chứ?",
+                "question": raw_message,
+                "missing": [
+                    {
+                        "type": "confirmation",
+                        "concept": "commit_teaching",
+                        "question": "Bạn confirm ghi draft teaching này vào KB chứ?",
+                    }
+                ],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": debug,
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action_record)
+
+        response = {
+            "status": "needs_clarification",
+            "intent": "clarification",
+            "answer": "Planner chưa trả về action hợp lệ. Bạn diễn đạt lại giúp mình nhé.",
+            "question": raw_message,
+            "missing": [],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {**debug, "planner_fallback_reason": "unhandled_action"},
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+    def _planner_debug(self, plan: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "llm_used": True,
+            "fallback_used": False,
+            "planner_used": True,
+            "planner_action": normalize_lookup(plan.get("action")),
+            "planner_confidence": plan.get("confidence", 0),
+            "planner_fallback_reason": plan.get("planner_fallback_reason", ""),
+            "planner_reasoning_summary": normalize_text(plan.get("reasoning_summary")),
+            "runtime_skills_used": unique_values(plan.get("_runtime_skills_used", [])) if isinstance(plan.get("_runtime_skills_used"), list) else [],
+            "runtime_skill_candidates": plan.get("_runtime_skill_candidates", []) if isinstance(plan.get("_runtime_skill_candidates"), list) else [],
+            "runtime_skill_selection_reason": normalize_text(plan.get("_runtime_skill_selection_reason")),
+            "runtime_skills_enabled": bool(plan.get("_runtime_skills_enabled", True)),
+        }
+
+    def _build_conversation_context(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        backend, store, fallback_reason = self._resolve_context_store(user_id=user_id, session_id=session_id)
+        local_store = LocalChatSessionEventStore()
+        memory_hydrated = False
+        memory_timeout = False
+        memory_errors: list[str] = []
+        memory_sync_status = "skipped"
+        memory_latency_ms = 0.0
+
+        should_hydrate = (
+            backend == "agentbase"
+            and self.chat_memory_hydrate_when_empty
+            and bool(chat_session.get("_memory_hydrate_needed"))
+        )
+        if should_hydrate:
+            hydrate_started = time.perf_counter()
+            hydrate = self._run_with_timeout(
+                lambda: store.list_recent_events(
+                    chat_session=chat_session,
+                    user_id=user_id,
+                    session_id=session_id,
+                    limit=self.chat_history_turn_limit,
+                ),
+                timeout_ms=self.chat_memory_timeout_ms,
+            )
+            memory_latency_ms += self._elapsed_ms(hydrate_started)
+            if hydrate["timed_out"]:
+                memory_timeout = True
+                memory_errors.append("hydrate_timeout")
+            elif hydrate["ok"]:
+                hydrated_events = hydrate["result"] if isinstance(hydrate["result"], list) else []
+                if hydrated_events:
+                    self._merge_memory_events_into_chat_session(chat_session, hydrated_events)
+                    memory_hydrated = True
+            else:
+                memory_errors.append(normalize_text(hydrate.get("error")) or "hydrate_error")
+                if self.chat_context_backend == "agentbase" and not self.chat_context_fallback_on_error:
+                    raise ValueError(f"AgentBase Memory context error: {hydrate.get('error')}")
+
+        events = local_store.list_recent_events(
+            chat_session=chat_session,
+            user_id=user_id,
+            session_id=session_id,
+            limit=self.chat_history_turn_limit,
+        )
+
+        if backend == "agentbase":
+            sync_started = time.perf_counter()
+            sync = self._run_with_timeout(
+                lambda: store.append_event(
+                    chat_session=chat_session,
+                    user_id=user_id,
+                    session_id=session_id,
+                    role="user",
+                    content=message,
+                ),
+                timeout_ms=self.chat_memory_timeout_ms,
+            )
+            memory_latency_ms += self._elapsed_ms(sync_started)
+            if sync["timed_out"]:
+                memory_timeout = True
+                memory_sync_status = "user_timeout"
+            elif sync["ok"]:
+                memory_sync_status = "user_synced"
+            else:
+                memory_sync_status = "user_error"
+                memory_errors.append(normalize_text(sync.get("error")) or "user_sync_error")
+                if self.chat_context_backend == "agentbase" and not self.chat_context_fallback_on_error:
+                    raise ValueError(f"AgentBase Memory context error: {sync.get('error')}")
+        elif backend == "local":
+            memory_sync_status = "local_only"
+
+        previous_events = self._previous_conversation_events(events, current_message=message)
+        context_terms = self._extract_context_terms(previous_events)
+        return {
+            "backend": backend,
+            "events": events,
+            "previous_events": previous_events,
+            "conversation_history": self._conversation_history_from_events(events),
+            "context_terms": context_terms,
+            "resolved_message": message,
+            "raw_message": message,
+            "used": bool(previous_events),
+            "fallback_reason": fallback_reason,
+            "user_id": user_id,
+            "session_id": session_id,
+            "memory_hydrated": memory_hydrated,
+            "memory_sync_status": memory_sync_status,
+            "memory_timeout": memory_timeout,
+            "memory_errors": memory_errors,
+            "memory_latency_ms": round(memory_latency_ms, 2),
+        }
+
+    def _run_with_timeout(self, func, *, timeout_ms: int) -> dict[str, Any]:
+        result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+        def runner() -> None:
+            try:
+                result_queue.put({"ok": True, "result": func(), "error": "", "timed_out": False})
+            except Exception as exc:  # pragma: no cover - exercised by fake stores in tests
+                result_queue.put({"ok": False, "result": None, "error": normalize_text(str(exc)), "timed_out": False})
+
+        thread = threading.Thread(target=runner, daemon=True)
+        thread.start()
+        thread.join(max(1, timeout_ms) / 1000)
+        if thread.is_alive():
+            return {"ok": False, "result": None, "error": "timeout", "timed_out": True}
+        try:
+            return result_queue.get_nowait()
+        except queue.Empty:
+            return {"ok": False, "result": None, "error": "no_result", "timed_out": False}
+
+    def _merge_memory_events_into_chat_session(self, chat_session: dict[str, Any], events: list[dict[str, Any]]) -> None:
+        current_messages = chat_session.get("messages", []) if isinstance(chat_session.get("messages"), list) else []
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for event in [*events, *current_messages]:
+            role = normalize_text(event.get("role"))
+            content = normalize_text(event.get("content"))
+            created_at = normalize_text(event.get("created_at")) or now_iso()
+            if not content:
+                continue
+            key = (role, content)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({"role": role, "content": content, "created_at": created_at})
+        chat_session["messages"] = merged[-self.chat_history_turn_limit :]
+
+    def _conversation_history_from_events(self, events: list[dict[str, Any]]) -> list[dict[str, str]]:
+        return [
+            {
+                "role": normalize_text(event.get("role")),
+                "content": normalize_text(event.get("content")),
+                "created_at": normalize_text(event.get("created_at")),
+                "source": "session_mirror",
+            }
+            for event in events[-self.chat_history_turn_limit :]
+            if normalize_text(event.get("content"))
+        ]
+
+    def _resolve_context_store(self, *, user_id: str, session_id: str) -> tuple[str, Any, str]:
+        if self.chat_context_backend == "local":
+            return "local", LocalChatSessionEventStore(), ""
+        missing_identity = not normalize_text(user_id) or not normalize_text(session_id)
+        if self.chat_context_backend == "agentbase":
+            if missing_identity:
+                raise ValueError("AgentBase Memory cần user_id và session_id để tách context theo session.")
+            if not self.chat_context_memory_id:
+                raise ValueError("Thiếu CHAT_CONTEXT_MEMORY_ID cho AgentBase Memory.")
+            return "agentbase", AgentBaseMemoryEventStore(memory_id=self.chat_context_memory_id), ""
+
+        if missing_identity or not self.chat_context_memory_id or MemoryClient is None:
+            reason = "missing_user_or_session" if missing_identity else "memory_not_configured"
+            return "local", LocalChatSessionEventStore(), reason
+        return "agentbase", AgentBaseMemoryEventStore(memory_id=self.chat_context_memory_id), ""
+
+    def _previous_conversation_events(self, events: list[dict[str, Any]], *, current_message: str) -> list[dict[str, Any]]:
+        previous = list(events)
+        if previous and previous[-1].get("role") == "user" and previous[-1].get("content") == current_message:
+            previous = previous[:-1]
+        return previous
+
+    def _extract_context_terms(self, events: list[dict[str, Any]]) -> list[str]:
+        terms: list[str] = []
+        for event in reversed(events):
+            content = normalize_text(event.get("content"))
+            if not content:
+                continue
+            for acronym in extract_acronyms(content):
+                if self._find_knowledge_by_name(acronym):
+                    terms.append(acronym)
+            if terms:
+                break
+        return unique_values(terms)
+
+    def _get_or_create_chat_session(self, *, session_id: str, user_id: str) -> dict[str, Any]:
+        data = self._load_chat_sessions()
+        cleaned_id = normalize_text(session_id) or new_id("chat")
+        session = copy.deepcopy(data["sessions"].get(cleaned_id))
+        if session:
+            if user_id and not session.get("user_id"):
+                session["user_id"] = normalize_text(user_id)
+            return session
+        return {
+            "id": cleaned_id,
+            "user_id": normalize_text(user_id),
+            "state": "idle",
+            "messages": [],
+            "pending_actions": {},
+            "latest_pending_action_id": "",
+            "active_teaching_session_id": "",
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+
+    def _save_chat_session(self, session: dict[str, Any]) -> None:
+        session["state"] = self._chat_session_state(session)
+        session["updated_at"] = now_iso()
+        data = self._load_chat_sessions()
+        persisted = copy.deepcopy(session)
+        for key in [
+            "_conversation_context",
+            "_context_user_id",
+            "_context_session_id",
+            "_debug_context",
+            "_use_runtime_skills",
+            "_latency_ms",
+            "_chat_started_at",
+            "_memory_hydrate_needed",
+        ]:
+            persisted.pop(key, None)
+        data["sessions"][session["id"]] = persisted
+        self._save_json(self.chat_sessions_path, data)
+
+    def _append_chat_message(self, session: dict[str, Any], *, role: str, content: str) -> None:
+        session.setdefault("messages", [])
+        session["messages"].append({"role": role, "content": normalize_text(content), "created_at": now_iso()})
+        session["messages"] = session["messages"][-20:]
+
+    def _pending_chat_actions(self, session: dict[str, Any], action_type: str = "") -> list[dict[str, Any]]:
+        actions = []
+        for action in session.get("pending_actions", {}).values():
+            if action.get("status") != "pending":
+                continue
+            if action_type and action.get("type") != action_type:
+                continue
+            actions.append(action)
+        return sorted(actions, key=lambda item: item.get("created_at", ""))
+
+    def _pending_action_planner_summary(self, action: dict[str, Any]) -> dict[str, Any]:
+        payload = action.get("payload", {}) if isinstance(action.get("payload"), dict) else {}
+        summary = {
+            "id": action.get("id", ""),
+            "type": action.get("type", ""),
+            "status": action.get("status", ""),
+            "created_at": action.get("created_at", ""),
+        }
+        if action.get("type") == "data_query":
+            summary.update(
+                {
+                    "current_query": normalize_text(payload.get("resolved_message") or payload.get("message")),
+                    "raw_message": normalize_text(payload.get("raw_message")),
+                    "context_terms": payload.get("context_terms", []) if isinstance(payload.get("context_terms"), list) else [],
+                    "refinements": payload.get("refinements", []) if isinstance(payload.get("refinements"), list) else [],
+                }
+            )
+        elif action.get("type") in {"start_teaching", "append_teaching"}:
+            summary["message"] = normalize_text(payload.get("message"))
+        elif action.get("type") == "commit_teaching":
+            summary["teaching_session_id"] = normalize_text(payload.get("teaching_session_id"))
+        else:
+            summary["payload"] = payload
+        return summary
+
+    def _create_pending_chat_action(
+        self,
+        session: dict[str, Any],
+        *,
+        action_type: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        self._cancel_pending_chat_actions(session, reason="replaced_by_new_pending_action")
+        action = {
+            "id": new_id("act"),
+            "type": action_type,
+            "status": "pending",
+            "payload": copy.deepcopy(payload),
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        session.setdefault("pending_actions", {})[action["id"]] = action
+        session["latest_pending_action_id"] = action["id"]
+        return action
+
+    def _cancel_pending_chat_actions(self, session: dict[str, Any], action_type: str = "", *, reason: str = "") -> None:
+        for action in self._pending_chat_actions(session, action_type=action_type):
+            action["status"] = "cancelled"
+            action["updated_at"] = now_iso()
+            if reason:
+                action["cancel_reason"] = reason
+        if not self._pending_chat_actions(session):
+            session["latest_pending_action_id"] = ""
+
+    def _cancel_active_pending_actions(self, session: dict[str, Any], *, reason: str) -> list[dict[str, Any]]:
+        pending = self._pending_chat_actions(session)
+        cancelled = []
+        for action in pending:
+            action["status"] = "cancelled"
+            action["updated_at"] = now_iso()
+            action["cancel_reason"] = reason
+            cancelled.append(action)
+        session["latest_pending_action_id"] = ""
+        return cancelled
+
+    def _build_pending_cancel_answer(self, cancelled: list[dict[str, Any]]) -> str:
+        if not cancelled:
+            return "Hiện không có pending action nào để hủy."
+        if len(cancelled) == 1:
+            action = cancelled[0]
+            return f"Mình đã hủy pending action `{action['id']}` ({action['type']})."
+        rendered = ", ".join(f"`{action['id']}` ({action['type']})" for action in cancelled)
+        return f"Mình đã hủy {len(cancelled)} pending actions: {rendered}."
+
+    def _handle_pending_status_query(self, *, chat_session: dict[str, Any], message: str) -> dict[str, Any]:
+        if not self._is_pending_status_query(message):
+            return {}
+        pending = self._pending_chat_actions(chat_session)
+        if not pending:
+            answer = "Không có pending action nào đang chờ trong session này."
+        else:
+            action = self._latest_pending_chat_action(chat_session) or pending[-1]
+            answer = self._render_pending_action_status(action)
+        response = {
+            "status": "answered",
+            "intent": "pending_status",
+            "answer": answer,
+            "question": message,
+            "missing": [],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {
+                "llm_used": False,
+                "fallback_used": False,
+                "pending_status_checked": True,
+                "pending_count": len(pending),
+            },
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=bool(pending), pending_action=(self._latest_pending_chat_action(chat_session) if pending else None))
+
+    def _render_pending_action_status(self, action: dict[str, Any]) -> str:
+        payload = action.get("payload", {}) if isinstance(action.get("payload"), dict) else {}
+        if action.get("type") == "data_query":
+            query = normalize_text(payload.get("resolved_message") or payload.get("message") or payload.get("raw_message"))
+            return f"Đang có 1 pending data query chờ confirm: `{query}`. Pending action id: `{action['id']}`."
+        if action.get("type") in {"start_teaching", "append_teaching"}:
+            message = normalize_text(payload.get("message"))
+            return f"Đang có 1 pending teaching action chờ confirm: `{message}`. Pending action id: `{action['id']}`."
+        if action.get("type") == "commit_teaching":
+            teaching_session_id = normalize_text(payload.get("teaching_session_id"))
+            return f"Đang có 1 pending commit teaching chờ confirm cho session `{teaching_session_id}`. Pending action id: `{action['id']}`."
+        return f"Đang có 1 pending action `{action.get('type')}` chờ confirm. Pending action id: `{action['id']}`."
+
+    def _handle_chat_confirmation(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+        pending_action_id: str = "",
+    ) -> dict[str, Any]:
+        if not (self._is_chat_confirmation(message) or self._is_chat_cancel(message) or normalize_text(pending_action_id)):
+            return {}
+        pending = self._pending_chat_actions(chat_session)
+        if not pending:
+            return {}
+
+        target_id = normalize_text(pending_action_id)
+        if target_id:
+            targets = [action for action in pending if action["id"] == target_id]
+            if not targets:
+                return self._finalize_chat_response(
+                    {
+                        "status": "needs_clarification",
+                        "intent": "clarification",
+                        "answer": f"Mình không tìm thấy pending action `{target_id}` trong session này.",
+                        "question": message,
+                        "missing": [],
+                        "used_knowledge_ids": [],
+                        "used_dictionary_ids": [],
+                        "used_example_ids": [],
+                        "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+                    },
+                    chat_session=chat_session,
+                    requires_confirmation=False,
+                )
+        else:
+            targets = [self._latest_pending_chat_action(chat_session) or pending[-1]]
+
+        action = targets[0]
+        if self._is_chat_cancel(message):
+            cancelled = self._cancel_active_pending_actions(chat_session, reason="user_cancelled")
+            return self._finalize_chat_response(
+                {
+                    "status": "cancelled",
+                    "intent": action.get("type", "cancel_action"),
+                    "answer": self._build_pending_cancel_answer(cancelled),
+                    "question": message,
+                    "missing": [],
+                    "used_knowledge_ids": [],
+                    "used_dictionary_ids": [],
+                    "used_example_ids": [],
+                    "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+                },
+                chat_session=chat_session,
+                requires_confirmation=False,
+            )
+        for other in pending:
+            if other.get("id") != action.get("id"):
+                other["status"] = "cancelled"
+                other["updated_at"] = now_iso()
+                other["cancel_reason"] = "superseded_by_confirmed_latest_pending_action"
+        if not self._is_chat_confirmation(message):
+            return {}
+        return self._confirm_chat_action(chat_session=chat_session, action=action, message=message)
+
+    def _handle_pending_action_refinement(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+    ) -> dict[str, Any]:
+        pending = self._pending_chat_actions(chat_session)
+        if len(pending) != 1:
+            return {}
+        action = pending[0]
+        if action.get("type") != "data_query":
+            return {}
+        if not self._looks_like_data_query_refinement(message):
+            return {}
+        return self._refine_pending_data_query_action(
+            chat_session=chat_session,
+            message=message,
+            pending_action_id=action.get("id", ""),
+        )
+
+    def _refine_pending_data_query_action(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+        pending_action_id: str = "",
+        planner_answer: str = "",
+        planner_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        pending = self._pending_chat_actions(chat_session, action_type="data_query")
+        if pending_action_id:
+            pending = [action for action in pending if action.get("id") == pending_action_id]
+        if not pending:
+            response = {
+                "status": "needs_clarification",
+                "intent": "clarification",
+                "answer": planner_answer or "Mình chưa thấy data query nào đang pending để cập nhật.",
+                "question": message,
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": planner_debug or {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+        if len(pending) > 1:
+            rendered = ", ".join(f"{action['id']}:{action['type']}" for action in pending)
+            response = {
+                "status": "needs_clarification",
+                "intent": "clarification",
+                "answer": f"Session này đang có nhiều pending data queries: {rendered}. Bạn gửi kèm pending_action_id muốn cập nhật nhé.",
+                "question": message,
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": planner_debug or {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+        action = pending[0]
+        payload = action.get("payload", {}) if isinstance(action.get("payload"), dict) else {}
+        previous_message = normalize_text(payload.get("resolved_message") or payload.get("message") or payload.get("raw_message"))
+        if not previous_message:
+            return {}
+        refined_message = self._merge_data_query_refinement(previous_message=previous_message, refinement=message)
+        payload["message"] = refined_message
+        payload["resolved_message"] = refined_message
+        payload.setdefault("raw_message", previous_message)
+        payload.setdefault("refinements", [])
+        if isinstance(payload["refinements"], list):
+            payload["refinements"].append({"message": message, "created_at": now_iso()})
+        action["payload"] = payload
+        action["updated_at"] = now_iso()
+        response = {
+            "status": "needs_confirmation",
+            "intent": "data_sql",
+            "answer": (
+                "Mình đã hiểu đây là phần bổ sung cho data query đang pending. "
+                f"Câu query hiện tại là: `{refined_message}`. "
+                f"Nếu đúng, nhắn `confirm` với `pending_action_id={action['id']}`; nếu muốn sửa tiếp thì cứ nhắn thêm."
+            ),
+            "question": refined_message,
+            "missing": [
+                {
+                    "type": "confirmation",
+                    "concept": "data_query",
+                    "question": "Bạn confirm mình xử lý data query đã cập nhật này chứ?",
+                }
+            ],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {
+                **(planner_debug or {"llm_used": False, "fallback_used": False}),
+                "pending_action_refined": True,
+                "refined_pending_action_id": action["id"],
+            },
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action)
+
+    def _merge_data_query_refinement(self, *, previous_message: str, refinement: str) -> str:
+        previous = normalize_text(previous_message)
+        addition = normalize_text(refinement)
+        if not addition:
+            return previous
+        if self._looks_like_data_query_refinement(addition):
+            return f"{previous}. Bổ sung: {addition}"
+        return addition
+
+    def _looks_like_data_query_refinement(self, message: str) -> bool:
+        lowered = normalize_lookup(message)
+        markers = [
+            "xếp hạng",
+            "rank",
+            "theo ",
+            "transid",
+            "số giao dịch",
+            "paying user",
+            "tpv",
+            "doanh thu",
+            "top ",
+            "provider",
+            "route",
+            "tháng",
+            "ngày",
+            "time range",
+        ]
+        return any(marker in lowered for marker in markers)
+
+    def _confirm_chat_action(self, *, chat_session: dict[str, Any], action: dict[str, Any], message: str) -> dict[str, Any]:
+        action_type = action.get("type", "")
+        payload = action.get("payload", {}) if isinstance(action.get("payload"), dict) else {}
+        action["status"] = "confirmed"
+        action["updated_at"] = now_iso()
+
+        if action_type == "start_teaching":
+            result = self.start_teach_session(
+                message=payload.get("message", ""),
+                stakeholder=chat_session.get("user_id", ""),
+                owner=chat_session.get("user_id", ""),
+            )
+            chat_session["active_teaching_session_id"] = result["session_id"]
+            action["status"] = "done"
+            commit_action = self._create_commit_teaching_action(chat_session, teaching_session_id=result["session_id"])
+            response = {
+                "status": result.get("status", "clarifying"),
+                "intent": "teach_knowledge",
+                "answer": self._build_teaching_chat_answer(result),
+                "question": message,
+                "session_id": result["session_id"],
+                "teaching_session": result.get("session"),
+                "draft": result.get("draft"),
+                "summary": result.get("summary"),
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            }
+            return self._finalize_chat_response(
+                response,
+                chat_session=chat_session,
+                requires_confirmation=True,
+                pending_action=commit_action,
+            )
+
+        if action_type == "append_teaching":
+            teaching_session_id = payload.get("teaching_session_id") or chat_session.get("active_teaching_session_id", "")
+            result = self.append_teach_message(session_id=teaching_session_id, message=payload.get("message", ""))
+            action["status"] = "done"
+            commit_action = self._create_commit_teaching_action(chat_session, teaching_session_id=teaching_session_id)
+            response = {
+                "status": result.get("status", "clarifying"),
+                "intent": "teach_knowledge",
+                "answer": self._build_teaching_chat_answer(result),
+                "question": message,
+                "session_id": teaching_session_id,
+                "teaching_session": result.get("session"),
+                "draft": result.get("draft"),
+                "summary": result.get("summary"),
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            }
+            return self._finalize_chat_response(
+                response,
+                chat_session=chat_session,
+                requires_confirmation=True,
+                pending_action=commit_action,
+            )
+
+        if action_type == "commit_teaching":
+            teaching_session_id = payload.get("teaching_session_id") or chat_session.get("active_teaching_session_id", "")
+            result = self.confirm_teach_session(session_id=teaching_session_id, decision="confirm")
+            action["status"] = "done"
+            chat_session["active_teaching_session_id"] = ""
+            answer = (
+                f"Đã ghi {len(result.get('knowledge_created', []))} knowledge mới vào KB."
+                if result.get("knowledge_created")
+                else f"Đã tạo {len(result.get('change_requests', []))} pending change cần review."
+                if result.get("change_requests")
+                else "Teaching session đã kết thúc."
+            )
+            response = {
+                "status": result.get("session", {}).get("status", "committed"),
+                "intent": "teach_knowledge",
+                "answer": answer,
+                "question": message,
+                "session_id": teaching_session_id,
+                "teaching_session": result.get("session"),
+                "knowledge_created": result.get("knowledge_created", []),
+                "change_requests": result.get("change_requests", []),
+                "missing": [],
+                "used_knowledge_ids": [item["id"] for item in result.get("knowledge_created", [])],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+        if action_type == "data_query":
+            result = self.ask_data_question(payload.get("message", ""))
+            action["status"] = "done"
+            response = {
+                "status": result.get("status", "answered"),
+                "intent": "data_sql",
+                "answer": self._synthesize_data_answer(payload.get("message", ""), result),
+                "question": payload.get("message", ""),
+                "sql": result.get("sql"),
+                "missing": result.get("missing", []),
+                "used_knowledge_ids": result.get("used_knowledge_ids")
+                or [item["id"] for item in result.get("known_knowledge", result.get("knowledge", []))],
+                "used_dictionary_ids": result.get("used_dictionary_ids", []),
+                "used_example_ids": result.get("used_example_ids", []),
+                "knowledge": result.get("known_knowledge", result.get("knowledge", [])),
+                "dictionary": result.get("dictionary", []),
+                "examples": result.get("examples", []),
+                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            }
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+        return self._finalize_chat_response(
+            {
+                "status": "error",
+                "intent": action_type or "unknown",
+                "answer": f"Pending action type chưa được hỗ trợ: {action_type}",
+                "question": message,
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+            },
+            chat_session=chat_session,
+            requires_confirmation=False,
+        )
+
+    def _create_commit_teaching_action(self, chat_session: dict[str, Any], *, teaching_session_id: str) -> dict[str, Any]:
+        self._cancel_pending_chat_actions(chat_session, action_type="commit_teaching", reason="replaced_by_new_draft")
+        return self._create_pending_chat_action(
+            chat_session,
+            action_type="commit_teaching",
+            payload={"teaching_session_id": teaching_session_id},
+        )
+
+    def _propose_data_query_action(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+        raw_message: str = "",
+        context: dict[str, Any],
+        conversation_context: dict[str, Any] | None = None,
+        llm_used: bool,
+        planner_answer: str = "",
+        planner_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        conversation_context = conversation_context or {}
+        action = self._create_pending_chat_action(
+            chat_session,
+            action_type="data_query",
+            payload={
+                "message": message,
+                "raw_message": raw_message or message,
+                "resolved_message": message,
+                "user_id": conversation_context.get("user_id", chat_session.get("user_id", "")),
+                "session_id": conversation_context.get("session_id", chat_session.get("id", "")),
+                "context_terms": conversation_context.get("context_terms", []),
+            },
+        )
+        prefix = (normalize_text(planner_answer) + " ") if normalize_text(planner_answer) else ""
+        debug = planner_debug or {"llm_used": llm_used, "fallback_used": not llm_used}
+        response = {
+            "status": "needs_confirmation",
+            "intent": "data_sql",
+            "answer": (
+                prefix
+                + "Phần lấy data/draft SQL cần bạn confirm trước. Nếu muốn mình xử lý câu hỏi data này, nhắn `confirm` "
+                f"với `pending_action_id={action['id']}`; nếu không thì nhắn `cancel`."
+            ),
+            "question": message,
+            "missing": [
+                {
+                    "type": "confirmation",
+                    "concept": "data_query",
+                    "question": "Bạn confirm mình xử lý phần query data/draft SQL chứ?",
+                }
+            ],
+            "used_knowledge_ids": [item["id"] for item in context.get("knowledge", [])],
+            "used_dictionary_ids": [item["id"] for item in context.get("dictionary", [])],
+            "used_example_ids": [item["id"] for item in context.get("examples", [])],
+            "debug": debug,
+        }
+        self._attach_debug_context(response, context=context, chat_session=chat_session)
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action)
+
+    def _propose_teaching_action(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+        llm_used: bool,
+        planner_answer: str = "",
+        planner_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        action = self._create_pending_chat_action(chat_session, action_type="start_teaching", payload={"message": message})
+        debug = planner_debug or {"llm_used": llm_used, "fallback_used": not llm_used}
+        response = {
+            "status": "needs_confirmation",
+            "intent": "teach_knowledge",
+            "answer": normalize_text(planner_answer) or (
+                "Mình hiểu câu này có vẻ là bạn đang muốn dạy knowledge mới. "
+                "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ?"
+            ),
+            "question": message,
+            "missing": [
+                {
+                    "type": "confirmation",
+                    "concept": "start_teaching",
+                    "question": "Bạn muốn mình bắt đầu teaching session từ nội dung này không?",
+                }
+            ],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": debug,
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action)
+
+    def _propose_append_teaching_action(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        message: str,
+        llm_used: bool,
+        planner_answer: str = "",
+        planner_debug: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self._cancel_pending_chat_actions(chat_session, action_type="commit_teaching", reason="draft_append_requested")
+        action = self._create_pending_chat_action(
+            chat_session,
+            action_type="append_teaching",
+            payload={"message": message, "teaching_session_id": chat_session.get("active_teaching_session_id", "")},
+        )
+        debug = planner_debug or {"llm_used": llm_used, "fallback_used": not llm_used}
+        response = {
+            "status": "needs_confirmation",
+            "intent": "teach_knowledge",
+            "answer": normalize_text(planner_answer) or "Mình hiểu đây có thể là phần bổ sung cho draft knowledge đang dạy. Bạn confirm mình append nội dung này vào draft chứ?",
+            "question": message,
+            "missing": [
+                {
+                    "type": "confirmation",
+                    "concept": "append_teaching",
+                    "question": "Bạn muốn append nội dung này vào draft đang dạy không?",
+                }
+            ],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": debug,
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action)
+
+    def _finalize_chat_response(
+        self,
+        response: dict[str, Any],
+        *,
+        chat_session: dict[str, Any],
+        requires_confirmation: bool,
+        pending_action: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        pending_action = pending_action or self._latest_pending_chat_action(chat_session)
+        conversation_context = chat_session.get("_conversation_context") if isinstance(chat_session.get("_conversation_context"), dict) else {}
+        response.setdefault("missing", [])
+        response.setdefault("used_knowledge_ids", [])
+        response.setdefault("used_dictionary_ids", [])
+        response.setdefault("used_example_ids", [])
+        response["chat_session_id"] = chat_session["id"]
+        response["requires_confirmation"] = bool(requires_confirmation)
+        response["pending_action_id"] = pending_action.get("id", "") if pending_action else ""
+        response["pending_action_type"] = pending_action.get("type", "") if pending_action else ""
+        response["confirm_options"] = ["confirm", "cancel"] if pending_action else []
+        response["session_state"] = self._chat_session_state(chat_session)
+        response["resolved_question"] = response.get("question") or conversation_context.get("resolved_message") or ""
+        response["conversation_context_used"] = bool(conversation_context.get("used"))
+        response["context_terms"] = conversation_context.get("context_terms", [])
+        response["context_backend"] = conversation_context.get("backend") or self.chat_context_backend
+        if conversation_context.get("fallback_reason"):
+            response.setdefault("debug", {})["context_fallback_reason"] = conversation_context["fallback_reason"]
+        self._append_assistant_context_event(chat_session, response.get("answer", ""))
+        debug = response.setdefault("debug", {})
+        debug["latency_ms"] = chat_session.get("_latency_ms", {})
+        debug["conversation_history_used"] = bool(conversation_context.get("conversation_history"))
+        debug["conversation_history_turns"] = len(conversation_context.get("conversation_history", []))
+        debug["memory_hydrated"] = bool(conversation_context.get("memory_hydrated"))
+        debug["memory_sync_status"] = conversation_context.get("memory_sync_status", "")
+        debug["memory_timeout"] = bool(conversation_context.get("memory_timeout"))
+        debug["memory_latency_ms"] = conversation_context.get("memory_latency_ms", 0)
+        if conversation_context.get("memory_errors"):
+            debug["memory_errors"] = conversation_context.get("memory_errors")
+        return response
+
+    def _elapsed_ms(self, started_at: float) -> float:
+        return round((time.perf_counter() - started_at) * 1000, 2)
+
+    def _record_chat_latency(self, chat_session: dict[str, Any], key: str, started_at: float) -> None:
+        latency = chat_session.get("_latency_ms")
+        if not isinstance(latency, dict):
+            latency = {}
+            chat_session["_latency_ms"] = latency
+        latency[key] = self._elapsed_ms(started_at)
+
+    def _record_chat_total_latency(self, chat_session: dict[str, Any]) -> None:
+        started_at = chat_session.get("_chat_started_at")
+        if isinstance(started_at, (int, float)):
+            self._record_chat_latency(chat_session, "total", float(started_at))
+
+    def _attach_debug_context(self, response: dict[str, Any], *, context: dict[str, Any], chat_session: dict[str, Any]) -> None:
+        if not chat_session.get("_debug_context"):
+            return
+        response["knowledge"] = context.get("knowledge", [])
+        response["dictionary"] = context.get("dictionary", [])
+        response["examples"] = context.get("examples", [])
+
+    def _append_assistant_context_event(self, chat_session: dict[str, Any], answer: str) -> None:
+        content = normalize_text(answer)
+        if not content:
+            return
+        self._append_chat_message(chat_session, role="assistant", content=content)
+        user_id = normalize_text(chat_session.get("_context_user_id") or chat_session.get("user_id"))
+        session_id = normalize_text(chat_session.get("_context_session_id") or chat_session.get("id"))
+        backend, store, _fallback_reason = self._resolve_context_store(user_id=user_id, session_id=session_id)
+        if backend != "agentbase":
+            return
+        sync_started = time.perf_counter()
+        sync = self._run_with_timeout(
+            lambda: store.append_event(
+                chat_session=chat_session,
+                user_id=user_id,
+                session_id=session_id,
+                role="assistant",
+                content=content,
+            ),
+            timeout_ms=self.chat_memory_timeout_ms,
+        )
+        conversation_context = chat_session.get("_conversation_context") if isinstance(chat_session.get("_conversation_context"), dict) else {}
+        previous_status = normalize_text(conversation_context.get("memory_sync_status"))
+        elapsed = self._elapsed_ms(sync_started)
+        conversation_context["memory_latency_ms"] = round(float(conversation_context.get("memory_latency_ms") or 0) + elapsed, 2)
+        if sync["timed_out"]:
+            conversation_context["memory_timeout"] = True
+            assistant_status = "assistant_timeout"
+        elif sync["ok"]:
+            assistant_status = "assistant_synced"
+        else:
+            assistant_status = "assistant_error"
+            conversation_context.setdefault("memory_errors", []).append(normalize_text(sync.get("error")) or "assistant_sync_error")
+            if not self.chat_context_fallback_on_error:
+                raise ValueError(f"AgentBase Memory context error: {sync.get('error')}")
+        conversation_context["memory_sync_status"] = " + ".join([item for item in [previous_status, assistant_status] if item])
+
+    def _latest_pending_chat_action(self, chat_session: dict[str, Any]) -> dict[str, Any]:
+        latest_id = chat_session.get("latest_pending_action_id", "")
+        latest = chat_session.get("pending_actions", {}).get(latest_id)
+        if latest and latest.get("status") == "pending":
+            return latest
+        pending = self._pending_chat_actions(chat_session)
+        return pending[-1] if pending else {}
+
+    def _chat_session_state(self, chat_session: dict[str, Any]) -> str:
+        latest = self._latest_pending_chat_action(chat_session)
+        if latest.get("type") == "data_query":
+            return "data_query_pending"
+        if latest.get("type") == "start_teaching":
+            return "teaching_pending"
+        if latest.get("type") in {"append_teaching", "commit_teaching"}:
+            return "teaching_draft_active"
+        if chat_session.get("active_teaching_session_id"):
+            return "teaching_draft_active"
+        return "idle"
+
+    def _chat_propose_teaching_session(self, *, message: str, user_id: str, llm_used: bool) -> dict[str, Any]:
+        session = {
+            "id": new_id("teach"),
+            "status": "awaiting_teach_confirmation",
+            "messages": [{"role": "user", "content": message, "created_at": now_iso()}],
+            "draft": {},
+            "stakeholder": normalize_text(user_id),
+            "team": "",
+            "domain": "",
+            "owner": normalize_text(user_id),
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+        }
+        self._save_teaching_session(session)
+        return {
+            "status": "needs_confirmation",
+            "intent": "teach_knowledge",
+            "answer": (
+                "Mình hiểu câu này có vẻ là bạn đang muốn dạy knowledge mới. "
+                "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ? "
+                "Nếu đồng ý, nhắn `confirm` với cùng `session_id`; nếu không thì nhắn `cancel`."
+            ),
+            "question": message,
+            "session_id": session["id"],
+            "teaching_session": copy.deepcopy(session),
+            "draft": {},
+            "summary": {},
+            "missing": [
+                {
+                    "type": "confirmation",
+                    "concept": "teach_knowledge",
+                    "question": "Bạn muốn mình bắt đầu teaching session từ nội dung này không?",
+                }
+            ],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+        }
+
+    def _chat_continue_teaching_session(
+        self,
+        *,
+        message: str,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        cleaned_session_id = normalize_text(session_id)
+        if not cleaned_session_id:
+            return {}
+        try:
+            session = self._get_teaching_session(cleaned_session_id)
+        except ValueError:
+            return {}
+        if session.get("status") in {"committed", "pending_approval", "cancelled"}:
+            return {}
+
+        llm_used = self._llm_configured()
+        if session.get("status") == "awaiting_teach_confirmation":
+            if self._is_chat_cancel(message):
+                session["status"] = "cancelled"
+                session["updated_at"] = now_iso()
+                self._save_teaching_session(session)
+                return {
+                    "status": "cancelled",
+                    "intent": "teach_knowledge",
+                    "answer": "Mình đã hủy đề xuất dạy knowledge này, chưa parse và chưa ghi gì vào KB.",
+                    "question": message,
+                    "session_id": cleaned_session_id,
+                    "teaching_session": copy.deepcopy(session),
+                    "missing": [],
+                    "used_knowledge_ids": [],
+                    "used_dictionary_ids": [],
+                    "used_example_ids": [],
+                    "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+                }
+            if not self._is_chat_confirmation(message):
+                return {
+                    "status": "needs_confirmation",
+                    "intent": "teach_knowledge",
+                    "answer": "Mình vẫn đang chờ bạn confirm có bắt đầu teaching session từ nội dung trước đó không. Nhắn `confirm` hoặc `cancel` nhé.",
+                    "question": message,
+                    "session_id": cleaned_session_id,
+                    "teaching_session": copy.deepcopy(session),
+                    "missing": [
+                        {
+                            "type": "confirmation",
+                            "concept": "teach_knowledge",
+                            "question": "Bạn muốn bắt đầu teaching session từ nội dung trước đó không?",
+                        }
+                    ],
+                    "used_knowledge_ids": [],
+                    "used_dictionary_ids": [],
+                    "used_example_ids": [],
+                    "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+                }
+            session["status"] = "clarifying"
+            session = self._refresh_teaching_session(session)
+            self._save_teaching_session(session)
+            result = self._teaching_session_response(session)
+            return {
+                "status": result.get("status", "clarifying"),
+                "intent": "teach_knowledge",
+                "answer": self._build_teaching_chat_answer(result),
+                "question": message,
+                "session_id": cleaned_session_id,
+                "teaching_session": result.get("session"),
+                "draft": result.get("draft"),
+                "summary": result.get("summary"),
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+            }
+
+        if self._is_chat_cancel(message):
+            result = self.confirm_teach_session(session_id=cleaned_session_id, decision="cancel")
+            return {
+                "status": "cancelled",
+                "intent": "teach_knowledge",
+                "answer": "Mình đã hủy teaching session này, chưa ghi gì vào KB.",
+                "question": message,
+                "session_id": cleaned_session_id,
+                "teaching_session": result.get("session"),
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+            }
+        if self._is_chat_confirmation(message):
+            result = self.confirm_teach_session(session_id=cleaned_session_id, decision="confirm")
+            answer = (
+                f"Đã ghi {len(result.get('knowledge_created', []))} knowledge mới vào KB."
+                if result.get("knowledge_created")
+                else f"Đã tạo {len(result.get('change_requests', []))} pending change cần review."
+                if result.get("change_requests")
+                else "Teaching session đã kết thúc."
+            )
+            return {
+                "status": result.get("session", {}).get("status", "committed"),
+                "intent": "teach_knowledge",
+                "answer": answer,
+                "question": message,
+                "session_id": cleaned_session_id,
+                "teaching_session": result.get("session"),
+                "knowledge_created": result.get("knowledge_created", []),
+                "change_requests": result.get("change_requests", []),
+                "missing": [],
+                "used_knowledge_ids": [item["id"] for item in result.get("knowledge_created", [])],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+            }
+        if self._is_chat_summary_request(message):
+            result = self.summarize_teach_session(session_id=cleaned_session_id)
+        else:
+            result = self.append_teach_message(session_id=cleaned_session_id, message=message)
+        return {
+            "status": result.get("status", "clarifying"),
+            "intent": "teach_knowledge",
+            "answer": self._build_teaching_chat_answer(result),
+            "question": message,
+            "session_id": cleaned_session_id,
+            "teaching_session": result.get("session"),
+            "draft": result.get("draft"),
+            "summary": result.get("summary"),
+            "missing": [],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+        }
+
+    def _build_teaching_chat_answer(self, result: dict[str, Any]) -> str:
+        if result.get("status") == "awaiting_confirmation":
+            summary = result.get("summary") or {}
+            term = summary.get("term") or result.get("draft", {}).get("name", "")
+            definition = summary.get("definition") or result.get("draft", {}).get("definition", "")
+            formula = summary.get("formula") or result.get("draft", {}).get("formula")
+            parts = [f"Mình hiểu bạn muốn dạy `{term}`: {definition}"] if term or definition else ["Mình đã tóm tắt được draft knowledge."]
+            if formula:
+                parts.append(f"Công thức/logic: {formula}.")
+            parts.append("Bạn nhắn `confirm` để ghi vào KB, hoặc bổ sung thêm nếu còn thiếu.")
+            return " ".join(parts)
+        question = result.get("question")
+        if question:
+            return f"Mình cần làm rõ thêm trước khi ghi vào KB: {question}"
+        return "Mình đã nhận thêm thông tin. Bạn có thể nhắn `tóm tắt` để xem draft hoặc `confirm` để ghi vào KB."
+
+    def _is_chat_confirmation(self, message: str) -> bool:
+        lowered = normalize_lookup(message)
+        return lowered in {"confirm", "ok", "oke", "yes", "đồng ý", "duyệt", "chốt", "ghi vào kb", "lưu lại"} or any(
+            marker in lowered for marker in ["confirm đi", "lưu vào kb", "ghi vào knowledge", "ghi lại đi"]
+        )
+
+    def _is_chat_cancel(self, message: str) -> bool:
+        lowered = normalize_lookup(message)
+        return lowered in {"cancel", "hủy", "huỷ", "bỏ qua", "reject", "cancel all"} or any(
+            marker in lowered
+            for marker in [
+                "hủy session",
+                "huỷ session",
+                "đừng lưu",
+                "cancel tất cả",
+                "cancel het",
+                "cancel hết",
+                "hủy tất cả",
+                "huỷ tất cả",
+                "hủy hết",
+                "huỷ hết",
+                "xóa pending",
+                "xoá pending",
+                "clear pending",
+            ]
+        )
+
+    def _is_pending_status_query(self, message: str) -> bool:
+        lowered = normalize_lookup(message)
+        has_pending = any(marker in lowered for marker in ["pending", "peding", "đang chờ", "chờ confirm", "chờ xác nhận"])
+        if not has_pending:
+            return False
+        return any(
+            marker in lowered
+            for marker in [
+                "có",
+                "không",
+                "ko",
+                "nào",
+                "list",
+                "liệt kê",
+                "show",
+                "xem",
+                "trạng thái",
+                "status",
+                "đang",
+            ]
+        )
+
+    def _is_chat_summary_request(self, message: str) -> bool:
+        lowered = normalize_lookup(message)
+        return lowered in {"summary", "summarize", "tóm tắt", "tom tat"} or any(marker in lowered for marker in ["tóm tắt lại", "show draft", "xem draft"])
+
+    def _search_knowledge_for_chat(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
+        records = self._approved_knowledge_records()
+        exact = self._search_knowledge_deterministic(query, records=records)
+        scored: dict[str, tuple[int, dict[str, Any]]] = {item["id"]: (100, item) for item in exact}
+        query_terms = self._semantic_query_terms(query)
+        query_phrases = self._semantic_query_phrases(query)
+        query_acronyms = {normalize_lookup(item) for item in extract_acronyms(query)}
+
+        for record in records:
+            haystack = normalize_lookup(
+                " ".join(
+                    [
+                        record.get("name", ""),
+                        record.get("canonical_definition", ""),
+                        record.get("logic", ""),
+                        record.get("formula", "") or "",
+                        " ".join(record.get("examples", [])),
+                        " ".join(record.get("paraphrases", [])),
+                        " ".join(record.get("conditions", [])),
+                        record.get("domain", ""),
+                    ]
+                )
+            )
+            score = 0
+            if normalize_lookup(record.get("name")) in query_acronyms:
+                score += 80
+            score += 12 * sum(1 for phrase in query_phrases if phrase in haystack)
+            score += 4 * sum(1 for term in query_terms if self._contains_term(haystack, term))
+            if score <= 0:
+                continue
+            existing_score = scored.get(record["id"], (0, record))[0]
+            if score > existing_score:
+                item = copy.deepcopy(record)
+                item["_match_score"] = score
+                scored[record["id"]] = (score, item)
+
+        return [
+            item
+            for _score, item in sorted(scored.values(), key=lambda pair: (pair[0], pair[1].get("name", "")), reverse=True)[:limit]
+        ]
+
+    def _approved_knowledge_records(self) -> list[dict[str, Any]]:
+        return [
+            copy.deepcopy(record)
+            for record in self._load_knowledge_base()["knowledge"].values()
+            if record.get("status") == "approved"
+        ]
+
+    def _search_knowledge_deterministic(self, query: str, *, records: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        normalized_query = normalize_lookup(query)
+        deterministic_records = []
+        exact_acronym_records = []
+        query_acronyms = extract_acronyms(query)
+        for record in records or self._approved_knowledge_records():
+            names = [record.get("name", ""), *record.get("paraphrases", [])]
+            if query_acronyms and any(
+                self._contains_term(name, acronym) for acronym in query_acronyms for name in names
+            ):
+                exact_acronym_records.append(record)
+            haystack = " ".join(
+                [
+                    record.get("name", ""),
+                    record.get("canonical_definition", ""),
+                    record.get("logic", ""),
+                    record.get("domain", ""),
+                    record.get("owner", ""),
+                    " ".join(record.get("paraphrases", [])),
+                    " ".join(record.get("conditions", [])),
+                    " ".join(record.get("examples", [])),
+                ]
+            )
+            if not normalized_query or normalized_query in normalize_lookup(haystack):
+                deterministic_records.append(record)
+
+        if query_acronyms and exact_acronym_records:
+            return sorted(exact_acronym_records, key=lambda item: item.get("name", ""))
+        return sorted(deterministic_records, key=lambda item: item.get("name", ""))
+
+    def _semantic_query_terms(self, text: str) -> list[str]:
+        stopwords = {
+            "tôi",
+            "mình",
+            "muốn",
+            "biết",
+            "cho",
+            "hỏi",
+            "giúp",
+            "giùm",
+            "được",
+            "gọi",
+            "nào",
+            "gì",
+            "là",
+            "cái",
+            "này",
+            "kia",
+            "thì",
+            "và",
+            "hay",
+            "hoặc",
+            "với",
+            "trong",
+            "the",
+            "what",
+            "which",
+            "called",
+            "mean",
+            "means",
+            "want",
+            "know",
+        }
+        words = re.findall(r"[A-Za-zÀ-ỹ_][\wÀ-ỹ_]{1,}", normalize_text(text))
+        terms = [word for word in words if normalize_lookup(word) not in stopwords]
+        return unique_values([*extract_acronyms(text), *terms])
+
+    def _semantic_query_phrases(self, text: str) -> list[str]:
+        terms = [normalize_lookup(term) for term in self._semantic_query_terms(text)]
+        phrases = []
+        for size in [3, 2]:
+            for index in range(0, max(0, len(terms) - size + 1)):
+                phrases.append(" ".join(terms[index : index + size]))
+        return unique_values(phrases)
+
+    def _synthesize_data_answer(self, message: str, data_result: dict[str, Any]) -> str:
+        if self._llm_configured():
+            compact = {
+                "status": data_result.get("status"),
+                "question": data_result.get("question"),
+                "sql": data_result.get("sql"),
+                "missing": data_result.get("missing", []),
+                "knowledge": [self._compact_knowledge(item) for item in data_result.get("known_knowledge", data_result.get("knowledge", []))],
+                "dictionary": [self._compact_dictionary(item) for item in data_result.get("dictionary", [])],
+                "examples": [self._compact_example(item) for item in data_result.get("examples", [])],
+                "explanation": data_result.get("explanation", []),
+            }
+            system = (
+                "You explain data-question results in natural Vietnamese. Use only the provided result. "
+                "If status is needs_dictionary or needs_knowledge, clearly say what is missing. "
+                "If SQL exists, explain it is a draft and mention key assumptions."
+            )
+            answer = self.llm_client.complete_text(
+                system=system,
+                user=json.dumps({"message": message, "result": compact}, ensure_ascii=False),
+                temperature=0.2,
+            )
+            if answer:
+                return answer
+        return self._synthesize_data_answer_deterministic(data_result)
+
+    def _synthesize_data_answer_deterministic(self, data_result: dict[str, Any]) -> str:
+        status = data_result.get("status")
+        if status == "sql_draft":
+            explanation = " ".join(data_result.get("explanation", [])[:3])
+            return f"Mình đã có đủ context để tạo SQL draft. {explanation}".strip()
+        if status == "needs_dictionary":
+            missing = data_result.get("missing", [])
+            rendered = "; ".join(item.get("question", "") for item in missing[:5])
+            return f"Mình hiểu ý câu hỏi, nhưng chưa đủ mapping bảng/cột để sinh SQL an toàn. Cần bổ sung: {rendered}"
+        if status == "needs_knowledge":
+            missing = data_result.get("missing", [])
+            rendered = "; ".join(item.get("question", "") for item in missing[:5])
+            return f"Mình chưa đủ Domain Knowledge để hiểu chắc câu hỏi này. Cần làm rõ: {rendered}"
+        return data_result.get("answer", "Mình cần thêm context để trả lời chắc chắn.")
+
+    def _build_dictionary_help_answer(self, message: str, context: dict[str, Any]) -> str:
+        if context.get("dictionary"):
+            tables = ", ".join(item.get("table", "") for item in context["dictionary"][:5])
+            return f"Mình tìm thấy các mapping liên quan: {tables}. Bạn có thể hỏi tiếp theo tên bảng/cột hoặc alias nghiệp vụ."
+        return (
+            "Hiện chưa có data dictionary phù hợp với câu hỏi này. "
+            "Bạn có thể thêm bằng action `add_data_dictionary` với table, description, columns, relationships và owner."
+        )
+
+    def _build_llm_sql_draft(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+        dictionary: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self._llm_configured():
+            return {}
+        compact = {
+            "question": question,
+            "knowledge": [self._compact_knowledge(item) for item in known],
+            "dictionary": [self._compact_dictionary(item) for item in dictionary],
+        }
+        system = (
+            "You draft SQL for business data questions. Return only JSON with fields: sql, explanation, answer. "
+            "Use only tables and columns present in the provided dictionary. Do not invent tables or columns. "
+            "If context is insufficient, return an empty sql string and explain what is missing."
+        )
+        parsed = self.llm_client.complete_json(
+            system=system,
+            user=json.dumps(compact, ensure_ascii=False),
+            temperature=0,
+        )
+        if not isinstance(parsed, dict):
+            return {}
+        sql = normalize_text(parsed.get("sql"))
+        if not sql:
+            return {}
+        allowed_tables = {normalize_lookup(item.get("table")) for item in dictionary}
+        if not any(table and table in normalize_lookup(sql) for table in allowed_tables):
+            return {}
+        explanation = parsed.get("explanation")
+        if isinstance(explanation, str):
+            explanation = [explanation]
+        if not isinstance(explanation, list):
+            explanation = ["SQL draft do LLM tạo từ Data Dictionary đã retrieve."]
+        return {
+            "sql": sql,
+            "explanation": [normalize_text(item) for item in explanation if normalize_text(item)],
+            "answer": normalize_text(parsed.get("answer")),
+        }
+
+    def _compact_knowledge(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id", ""),
+            "name": item.get("name", ""),
+            "definition": item.get("canonical_definition", ""),
+            "logic": item.get("logic", ""),
+            "formula": item.get("formula"),
+            "conditions": item.get("conditions", []),
+            "paraphrases": item.get("paraphrases", []),
+            "domain": item.get("domain", ""),
+        }
+
+    def _compact_dictionary(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id", ""),
+            "table": item.get("table", ""),
+            "description": item.get("description", ""),
+            "columns": item.get("columns", []),
+            "relationships": item.get("relationships", []),
+        }
+
+    def _compact_example(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id", ""),
+            "question": item.get("question", ""),
+            "sql": item.get("sql", ""),
+            "explanation": item.get("explanation", ""),
+            "concepts": item.get("concepts", []),
+            "used_tables": item.get("used_tables", []),
+        }
+
+    def _compact_planner_knowledge(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id", ""),
+            "name": item.get("name", ""),
+            "definition": item.get("canonical_definition", ""),
+            "formula": item.get("formula"),
+            "domain": item.get("domain", ""),
+        }
+
+    def _compact_planner_dictionary(self, item: dict[str, Any]) -> dict[str, Any]:
+        compact_columns = []
+        for column in item.get("columns", [])[:24]:
+            if not isinstance(column, dict):
+                continue
+            compact_columns.append(
+                {
+                    "name": column.get("name", ""),
+                    "data_type": column.get("data_type", ""),
+                    "business_meaning": column.get("business_meaning", ""),
+                    "aliases": column.get("aliases", []),
+                }
+            )
+        return {
+            "id": item.get("id", ""),
+            "table": item.get("table", ""),
+            "description": item.get("description", ""),
+            "columns": compact_columns,
+        }
+
+    def _compact_planner_example(self, item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": item.get("id", ""),
+            "question": item.get("question", ""),
+            "explanation": item.get("explanation", ""),
+            "concepts": item.get("concepts", []),
+            "used_tables": item.get("used_tables", []),
+        }
+
     def _dictionary_haystack(self, record: dict[str, Any]) -> str:
         parts = [record.get("table", ""), record.get("description", ""), record.get("owner", "")]
         for column in record.get("columns", []):
@@ -1733,11 +4192,326 @@ class KnowledgeStore:
             return False
         return self._contains_term(self._dictionary_haystack(record), cleaned)
 
+    def _search_dictionary_for_question(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        records_by_id: dict[str, dict[str, Any]] = {}
+        queries = [question]
+        for item in known:
+            queries.extend(
+                [
+                    item.get("name", ""),
+                    item.get("canonical_definition", ""),
+                    item.get("formula", "") or "",
+                    " ".join(item.get("paraphrases", [])),
+                    " ".join(item.get("conditions", [])),
+                ]
+            )
+        for query in queries:
+            for record in self.search_data_dictionary(query):
+                records_by_id[record["id"]] = record
+        return sorted(records_by_id.values(), key=lambda item: item.get("table", ""))
+
+    def _search_dictionary_for_chat(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        records_by_id: dict[str, tuple[int, dict[str, Any]]] = {}
+        queries = [question]
+        for item in known:
+            queries.extend(
+                [
+                    item.get("name", ""),
+                    item.get("canonical_definition", ""),
+                    item.get("formula", "") or "",
+                    " ".join(item.get("paraphrases", [])),
+                    " ".join(item.get("conditions", [])),
+                ]
+            )
+        query_terms = []
+        for query in queries:
+            query_terms.extend(self._extract_question_terms(query))
+
+        for record in self._load_data_dictionary()["records"].values():
+            if record.get("status") != "approved":
+                continue
+            score = 0
+            haystack = self._dictionary_haystack(record)
+            normalized_haystack = normalize_lookup(haystack)
+            for query in queries:
+                normalized_query = normalize_lookup(query)
+                if normalized_query and normalized_query in normalized_haystack:
+                    score += 12
+            score += 3 * sum(1 for term in query_terms if self._dictionary_matches_term(record, term))
+            if score <= 0:
+                continue
+            item = copy.deepcopy(record)
+            item["_match_score"] = score
+            existing_score = records_by_id.get(item["id"], (0, item))[0]
+            if score > existing_score:
+                records_by_id[item["id"]] = (score, item)
+        return [
+            item
+            for _score, item in sorted(records_by_id.values(), key=lambda pair: (pair[0], pair[1].get("table", "")), reverse=True)
+        ]
+
+    def _dictionary_covers_term(self, dictionary: list[dict[str, Any]], term: str) -> bool:
+        return any(self._dictionary_matches_term(record, term) for record in dictionary)
+
+    def _dictionary_covers_knowledge(self, knowledge: dict[str, Any], dictionary: list[dict[str, Any]]) -> bool:
+        if not dictionary:
+            return False
+        name = knowledge.get("name", "")
+        if self._dictionary_covers_term(dictionary, name):
+            return True
+
+        context = " ".join(
+            [
+                knowledge.get("canonical_definition", ""),
+                knowledge.get("formula", "") or "",
+                " ".join(knowledge.get("paraphrases", [])),
+                " ".join(knowledge.get("conditions", [])),
+            ]
+        )
+        context_terms = [
+            term
+            for term in self._extract_question_terms(context)
+            if normalize_lookup(term) != normalize_lookup(name) and not self._is_ignorable_question_term(term)
+        ]
+        if not context_terms:
+            return False
+        covered = [term for term in context_terms if self._dictionary_covers_term(dictionary, term)]
+        if self._looks_like_ratio_metric(knowledge):
+            has_revenue = any(self._is_revenue_term(term) for term in covered)
+            has_user = any(self._is_user_term(term) for term in covered)
+            return has_revenue and has_user
+        return bool(covered)
+
+    def _is_ignorable_question_term(self, term: str) -> bool:
+        cleaned = normalize_lookup(term).strip("_ ")
+        if not cleaned:
+            return True
+        stopwords = {
+            "bao",
+            "nhiêu",
+            "theo",
+            "tháng",
+            "ngày",
+            "tuần",
+            "quý",
+            "năm",
+            "cho",
+            "của",
+            "với",
+            "trong",
+            "là",
+            "what",
+            "how",
+            "many",
+            "much",
+            "the",
+            "per",
+            "total",
+            "average",
+            "avg",
+            "trung",
+            "bình",
+            "kỳ",
+            "period",
+            "reporting",
+        }
+        return cleaned in stopwords or cleaned.isdigit()
+
+    def _is_revenue_term(self, term: str) -> bool:
+        cleaned = normalize_lookup(term)
+        return any(marker in cleaned for marker in ["revenue", "doanh thu", "gmv", "amount", "payment"])
+
+    def _is_user_term(self, term: str) -> bool:
+        cleaned = normalize_lookup(term)
+        return any(marker in cleaned for marker in ["user", "người dùng", "khách hàng", "customer"])
+
+    def _looks_like_ratio_metric(self, knowledge: dict[str, Any]) -> bool:
+        context = normalize_lookup(
+            " ".join(
+                [
+                    knowledge.get("name", ""),
+                    knowledge.get("canonical_definition", ""),
+                    knowledge.get("formula", "") or "",
+                    " ".join(knowledge.get("paraphrases", [])),
+                ]
+            )
+        )
+        return "/" in context or " per " in f" {context} " or ("revenue" in context and "user" in context)
+
+    def _find_dictionary_columns_for_term(
+        self,
+        dictionary: list[dict[str, Any]],
+        term: str,
+    ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        matches: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+        normalized_term = normalize_lookup(term)
+        for record in dictionary:
+            for column in record.get("columns", []):
+                haystack = " ".join(
+                    [
+                        column.get("name", ""),
+                        column.get("business_meaning", ""),
+                        column.get("data_type", ""),
+                        " ".join(column.get("aliases", [])),
+                    ]
+                )
+                if self._contains_term(haystack, term):
+                    column_name = normalize_lookup(column.get("name"))
+                    aliases = {normalize_lookup(alias) for alias in column.get("aliases", [])}
+                    score = 5
+                    if column_name == normalized_term:
+                        score = 0
+                    elif normalized_term in aliases and any(marker in column_name for marker in ["name", "title", "label"]):
+                        score = 1
+                    elif normalized_term in aliases:
+                        score = 2
+                    elif any(marker in column_name for marker in ["name", "title", "label"]):
+                        score = 3
+                    if column_name.endswith("_id") or column_name == "id":
+                        score += 4
+                    matches.append((score, record, column))
+        return [(record, column) for _score, record, column in sorted(matches, key=lambda item: item[0])]
+
+    def _find_first_column_for_terms(
+        self,
+        dictionary: list[dict[str, Any]],
+        terms: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        for term in terms:
+            matches = self._find_dictionary_columns_for_term(dictionary, term)
+            if matches:
+                return matches[0]
+        return None
+
+    def _sql_identifier(self, value: str) -> str:
+        cleaned = normalize_text(value)
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cleaned):
+            return cleaned
+        return '"' + cleaned.replace('"', '""') + '"'
+
+    def _sql_column_ref(self, table: str, column: str) -> str:
+        return f"{self._sql_identifier(table)}.{self._sql_identifier(column)}"
+
+    def _sql_path_ref(self, value: str) -> str:
+        parts = [part for part in normalize_text(value).split(".") if part]
+        return ".".join(self._sql_identifier(part) for part in parts)
+
+    def _build_from_clause(self, dictionary: list[dict[str, Any]]) -> str:
+        tables = unique_values([record.get("table", "") for record in dictionary])
+        if not tables:
+            return ""
+        joined = {tables[0]}
+        clauses = [f"FROM {self._sql_identifier(tables[0])}"]
+        relationships = []
+        for record in dictionary:
+            relationships.extend(record.get("relationships", []))
+
+        for table in tables[1:]:
+            join_clause = ""
+            for relationship in relationships:
+                from_path = normalize_text(relationship.get("from"))
+                to_path = normalize_text(relationship.get("to"))
+                from_table = from_path.split(".")[0] if "." in from_path else ""
+                to_table = to_path.split(".")[0] if "." in to_path else ""
+                if table == from_table and to_table in joined:
+                    join_clause = f"JOIN {self._sql_identifier(table)} ON {self._sql_path_ref(from_path)} = {self._sql_path_ref(to_path)}"
+                    break
+                if table == to_table and from_table in joined:
+                    join_clause = f"JOIN {self._sql_identifier(table)} ON {self._sql_path_ref(from_path)} = {self._sql_path_ref(to_path)}"
+                    break
+            if join_clause:
+                clauses.append(join_clause)
+                joined.add(table)
+        return "\n".join(clauses)
+
+    def _build_deterministic_sql_draft(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+        dictionary: list[dict[str, Any]],
+        detected_concepts: list[str],
+    ) -> str:
+        from_clause = self._build_from_clause(dictionary)
+        if not from_clause:
+            return ""
+
+        known_names = {normalize_lookup(item.get("name")) for item in known}
+        group_columns: list[tuple[str, str]] = []
+        for concept in detected_concepts:
+            if normalize_lookup(concept) in known_names or self._is_ignorable_question_term(concept):
+                continue
+            matches = self._find_dictionary_columns_for_term(dictionary, concept)
+            if matches:
+                record, column = matches[0]
+                ref = self._sql_column_ref(record["table"], column["name"])
+                alias = self._sql_identifier(column["name"])
+                if (ref, alias) not in group_columns:
+                    group_columns.append((ref, alias))
+
+        metric_expressions: list[tuple[str, str]] = []
+        for item in known:
+            metric_name = item.get("name", "metric").lower()
+            direct_column = self._find_first_column_for_terms(dictionary, [item.get("name", "")])
+            if direct_column:
+                record, column = direct_column
+                metric_expressions.append((self._sql_column_ref(record["table"], column["name"]), metric_name))
+                continue
+
+            if self._looks_like_ratio_metric(item):
+                revenue_column = self._find_first_column_for_terms(dictionary, ["revenue", "doanh thu", "gmv", "amount"])
+                user_column = self._find_first_column_for_terms(dictionary, ["active user", "user", "user_id", "customer"])
+                if revenue_column and user_column:
+                    revenue_record, revenue = revenue_column
+                    user_record, user = user_column
+                    expression = (
+                        f"SUM({self._sql_column_ref(revenue_record['table'], revenue['name'])}) / "
+                        f"NULLIF(COUNT(DISTINCT {self._sql_column_ref(user_record['table'], user['name'])}), 0)"
+                    )
+                    metric_expressions.append((expression, metric_name))
+
+        if not metric_expressions:
+            revenue_column = self._find_first_column_for_terms(dictionary, ["revenue", "doanh thu", "gmv", "amount"])
+            if revenue_column and any(self._is_revenue_term(term) for term in self._extract_question_terms(question)):
+                record, column = revenue_column
+                metric_expressions.append((f"SUM({self._sql_column_ref(record['table'], column['name'])})", "revenue"))
+
+        select_parts = [f"{ref} AS {alias}" for ref, alias in group_columns]
+        select_parts.extend(f"{expr} AS {self._sql_identifier(alias)}" for expr, alias in metric_expressions)
+        if not select_parts:
+            first_record = dictionary[0]
+            for column in first_record.get("columns", [])[:5]:
+                select_parts.append(
+                    f"{self._sql_column_ref(first_record['table'], column['name'])} AS {self._sql_identifier(column['name'])}"
+                )
+        if not select_parts:
+            return ""
+
+        sql = "SELECT\n  " + ",\n  ".join(select_parts) + "\n" + from_clause
+        if group_columns and metric_expressions:
+            sql += "\nGROUP BY " + ", ".join(ref for ref, _alias in group_columns)
+        if not metric_expressions:
+            sql += "\nLIMIT 100"
+        return sql + ";"
+
     def _extract_question_terms(self, text: str) -> list[str]:
         cleaned = normalize_text(text)
         terms = extract_acronyms(cleaned)
         for match in re.finditer(r"(?:theo|by|group by|phân theo)\s+([A-Za-zÀ-ỹ_][\wÀ-ỹ_ ]{1,40})", cleaned, flags=re.IGNORECASE):
-            terms.append(match.group(1).strip(" ?.,"))
+            grouped_term = re.split(
+                r"\s+(?:là|bao|how|what|where|when|is|are)\b",
+                match.group(1).strip(" ?.,"),
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            terms.append(grouped_term.strip(" ?.,"))
         words = re.findall(r"[A-Za-zÀ-ỹ_][\wÀ-ỹ_]{2,}", cleaned)
         stopwords = {
             "bao",
@@ -1770,18 +4544,26 @@ class KnowledgeStore:
         question: str,
         known: list[dict[str, Any]],
         detected_concepts: list[str],
+        dictionary: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, str]]:
-        business_terms = [item.get("name", "") for item in known] or detected_concepts or [question]
-        missing = [
-            {
-                "type": "table_mapping",
-                "concept": term,
-                "question": f"{term} lấy từ bảng nào?",
-            }
-            for term in unique_values(business_terms)
-        ]
+        dictionary = dictionary or []
+        missing: list[dict[str, str]] = []
+        known_names = {normalize_lookup(item.get("name")) for item in known}
+        for item in known:
+            term = item.get("name", "")
+            if term and not self._dictionary_covers_knowledge(item, dictionary):
+                missing.append(
+                    {
+                        "type": "table_mapping",
+                        "concept": term,
+                        "question": f"{term} lấy từ bảng/cột nào hoặc được tính từ những cột nào?",
+                    }
+                )
+
         for concept in detected_concepts:
-            if concept not in business_terms:
+            if normalize_lookup(concept) in known_names or self._is_ignorable_question_term(concept):
+                continue
+            if not self._dictionary_covers_term(dictionary, concept):
                 missing.append(
                     {
                         "type": "column_mapping",
@@ -1789,7 +4571,26 @@ class KnowledgeStore:
                         "question": f"{concept} nằm ở bảng/cột nào?",
                     }
                 )
-        return missing
+
+        if not known and not missing and not dictionary:
+            for term in unique_values(detected_concepts or [question]):
+                if not self._is_ignorable_question_term(term):
+                    missing.append(
+                        {
+                            "type": "column_mapping",
+                            "concept": term,
+                            "question": f"{term} nằm ở bảng/cột nào?",
+                        }
+                    )
+
+        seen: set[tuple[str, str]] = set()
+        deduped = []
+        for item in missing:
+            key = (item["type"], normalize_lookup(item["concept"]))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(item)
+        return deduped
 
     def _build_sql_explanation(
         self,
@@ -1808,8 +4609,10 @@ class KnowledgeStore:
         )
         if example.get("explanation"):
             explanation.append(example["explanation"])
-        else:
+        elif example:
             explanation.append(f"SQL draft lấy từ Question Example {example.get('id')}")
+        else:
+            explanation.append("SQL draft được dựng từ Data Dictionary đã approved, không dùng bảng/cột ngoài context retrieved.")
         return explanation
 
     def _load_candidates(self) -> dict[str, Any]:
@@ -1826,6 +4629,11 @@ class KnowledgeStore:
         if self.db:
             return self.db.load_teaching_sessions()
         return self._load_json(self.teaching_sessions_path, empty_teaching_sessions)
+
+    def _load_chat_sessions(self) -> dict[str, Any]:
+        if self.db:
+            return self.db.load_chat_sessions()
+        return self._load_json(self.chat_sessions_path, empty_chat_sessions)
 
     def _load_data_dictionary(self) -> dict[str, Any]:
         if self.db:
@@ -1853,6 +4661,9 @@ class KnowledgeStore:
                 return
             if path == self.teaching_sessions_path:
                 self.db.save_teaching_sessions(data)
+                return
+            if path == self.chat_sessions_path:
+                self.db.save_chat_sessions(data)
                 return
             if path == self.data_dictionary_path:
                 self.db.save_data_dictionary(data)

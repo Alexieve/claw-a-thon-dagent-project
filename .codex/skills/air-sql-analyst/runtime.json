@@ -1,0 +1,36 @@
+{
+  "enabled": true,
+  "trigger_terms": [
+    "zalopay",
+    "air",
+    "ota",
+    "aov",
+    "arppu",
+    "tpv",
+    "route",
+    "provider",
+    "booking window",
+    "top route",
+    "ve may bay",
+    "vé máy bay",
+    "hang",
+    "hãng",
+    "chang",
+    "chặng",
+    "san bay",
+    "sân bay"
+  ],
+  "domains": [
+    "Zalopay AIR/OTA"
+  ],
+  "tables": [
+    "search_air",
+    "payment_air"
+  ],
+  "instruction_sections": [
+    "Core Workflow",
+    "Required Rules",
+    "Output Contract"
+  ],
+  "max_instruction_chars": 4000
+}

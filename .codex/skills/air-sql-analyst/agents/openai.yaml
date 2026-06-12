@@ -1,0 +1,4 @@
+interface:
+  display_name: "Air SQL Analyst"
+  short_description: "Zalopay AIR SQL workflow helper"
+  default_prompt: "Use $air-sql-analyst to clarify an Air/OTA data request and draft Presto SQL."
