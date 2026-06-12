@@ -139,6 +139,7 @@ class RuntimeSkillRegistry:
         scored: list[tuple[int, dict[str, Any]]] = []
         for skill in self.enabled_skills():
             runtime = skill.get("runtime", {}) if isinstance(skill.get("runtime"), dict) else {}
+            query_tokens = set(cleaned_query.split())
             haystack = normalize_lookup(
                 " ".join(
                     [
@@ -150,14 +151,36 @@ class RuntimeSkillRegistry:
                     ]
                 )
             )
+            haystack_tokens = set(haystack.split())
+            fallback_words = [
+                word
+                for word in cleaned_query.split()
+                if len(word) > 2
+                and word
+                not in {
+                    "about",
+                    "with",
+                    "the",
+                    "and",
+                    "for",
+                    "from",
+                    "when",
+                    "user",
+                    "need",
+                    "needs",
+                    "want",
+                    "wants",
+                    "help",
+                }
+            ]
             score = 0
             for term in self._runtime_terms(runtime):
                 normalized = normalize_lookup(term)
-                if normalized and normalized in cleaned_query:
+                if normalized and self._runtime_term_matches(normalized, cleaned_query, query_tokens):
                     score += 10
-                elif normalized and normalized in haystack and normalized in cleaned_query:
+                elif normalized and normalized in haystack and self._runtime_term_matches(normalized, cleaned_query, query_tokens):
                     score += 4
-            if not score and cleaned_query and any(word in haystack for word in cleaned_query.split()):
+            if not score and cleaned_query and any(word in haystack_tokens for word in fallback_words):
                 score = 1
             if score > 0:
                 card = {
@@ -189,6 +212,13 @@ class RuntimeSkillRegistry:
             if isinstance(values, list):
                 terms.extend(str(item) for item in values)
         return unique_values(terms)
+
+    def _runtime_term_matches(self, normalized_term: str, cleaned_query: str, query_tokens: set[str]) -> bool:
+        if not normalized_term:
+            return False
+        if " " not in normalized_term and len(normalized_term) <= 3:
+            return normalized_term in query_tokens
+        return normalized_term in cleaned_query
 
 
 class LocalChatSessionEventStore:
@@ -1637,6 +1667,37 @@ class KnowledgeStore:
                 matches.append(item)
         return sorted(matches, key=lambda item: (int(item.get("_match_score") or 0), item.get("updated_at", "")), reverse=True)
 
+    def _filter_question_examples_for_known_concepts(
+        self,
+        examples: list[dict[str, Any]],
+        known: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not known:
+            return examples
+        concept_terms: list[str] = []
+        for item in known:
+            concept_terms.extend([item.get("name", ""), *item.get("paraphrases", [])])
+        normalized_terms = [normalize_lookup(term) for term in concept_terms if normalize_lookup(term)]
+        if not normalized_terms:
+            return examples
+
+        filtered = []
+        for example in examples:
+            haystack = normalize_lookup(
+                " ".join(
+                    [
+                        example.get("question", ""),
+                        example.get("explanation", ""),
+                        example.get("sql", ""),
+                        " ".join(example.get("concepts", [])),
+                        " ".join(example.get("used_tables", [])),
+                    ]
+                )
+            )
+            if any(self._contains_term(haystack, term) for term in normalized_terms):
+                filtered.append(example)
+        return filtered
+
     def chat(
         self,
         *,
@@ -1691,6 +1752,12 @@ class KnowledgeStore:
             self._save_chat_session(chat_session)
             return refinement_result
 
+        active_runtime_cancel_result = self._handle_active_runtime_skill_cancel(chat_session=chat_session, message=cleaned)
+        if active_runtime_cancel_result:
+            self._record_chat_total_latency(chat_session)
+            self._save_chat_session(chat_session)
+            return active_runtime_cancel_result
+
         memory_started = time.perf_counter()
         conversation_context = self._build_conversation_context(
             chat_session=chat_session,
@@ -1740,7 +1807,7 @@ class KnowledgeStore:
         detected_concepts = unique_values([*analysis["detected_terms"], *self._extract_question_terms(cleaned)])
         missing_knowledge = analysis["unknown"]
         dictionary_matches = self._search_dictionary_for_question(cleaned, known)
-        example_matches = self.search_question_examples(cleaned)
+        example_matches = self._filter_question_examples_for_known_concepts(self.search_question_examples(cleaned), known)
 
         if missing_knowledge:
             return {
@@ -2384,6 +2451,7 @@ class KnowledgeStore:
         parsed["_runtime_skills_used"] = [item.get("name", "") for item in compact_input.get("runtime_skills", []) if item.get("name")]
         parsed["_runtime_skill_candidates"] = compact_input.get("runtime_skill_candidates", [])
         parsed["_runtime_skill_selection_reason"] = compact_input.get("runtime_skill_selection_reason", "")
+        parsed["_active_runtime_skill"] = normalize_text(compact_input.get("active_runtime_skill"))
         parsed["_runtime_skills_enabled"] = bool(context.get("_runtime_skills_enabled", True))
         return parsed
 
@@ -2396,7 +2464,12 @@ class KnowledgeStore:
         conversation_context: dict[str, Any],
     ) -> dict[str, Any]:
         skill_started = time.perf_counter()
+        context["_active_runtime_skill"] = normalize_text(chat_session.get("active_runtime_skill"))
         runtime_skills = self._runtime_chat_skills(raw_message=raw_message, context=context)
+        if context.get("_clear_active_runtime_skill"):
+            chat_session["active_runtime_skill"] = ""
+        elif context.get("_next_active_runtime_skill"):
+            chat_session["active_runtime_skill"] = normalize_text(context.get("_next_active_runtime_skill"))
         self._record_chat_latency(chat_session, "skill_select", skill_started)
         runtime_skill_candidates = context.get("_runtime_skill_candidates", [])
         runtime_skill_selection_reason = context.get("_runtime_skill_selection_reason", "")
@@ -2436,6 +2509,7 @@ class KnowledgeStore:
             },
             "runtime_skill_candidates": runtime_skill_candidates,
             "runtime_skill_selection_reason": runtime_skill_selection_reason,
+            "active_runtime_skill": normalize_text(chat_session.get("active_runtime_skill")),
             "runtime_skills": runtime_skills,
             "safety_policy": {
                 "no_confirmation_needed": ["answer_direct", "ask_clarification", "recall_conversation"],
@@ -2455,17 +2529,50 @@ class KnowledgeStore:
         if context.get("_runtime_skills_enabled") is False:
             context["_runtime_skill_candidates"] = []
             context["_runtime_skill_selection_reason"] = "runtime skills disabled by request/config"
+            context["_runtime_skills_selected_names"] = []
             return []
         registry = RuntimeSkillRegistry()
+        active_skill_name = normalize_text(context.get("_active_runtime_skill"))
+        if active_skill_name:
+            active_skill = self._runtime_skill_by_name(registry, active_skill_name)
+            runtime = active_skill.get("runtime", {}) if isinstance(active_skill.get("runtime"), dict) else {}
+            if active_skill and runtime.get("sticky") is True:
+                card = registry.skill_card(active_skill)
+                card["score"] = max(int(card.get("score") or 0), 100)
+                card["matched_by"] = "active_session"
+                context["_runtime_skill_candidates"] = [card]
+                context["_runtime_skill_selection_reason"] = f"using active runtime skill from session: {active_skill_name}"
+                context["_runtime_skills_selected_names"] = [active_skill_name]
+                context["_next_active_runtime_skill"] = active_skill_name
+                return [registry.skill_payload(active_skill)]
+            context["_clear_active_runtime_skill"] = True
         skill_query = self._runtime_skill_query(raw_message=raw_message, context=context)
         candidates = registry.query_candidates(skill_query)
         cards = [registry.skill_card(skill) for skill in candidates]
         selected_names, reason = self._auto_select_runtime_skill_names(cards)
         if not selected_names and cards:
             selected_names, reason = self._select_runtime_skill_names(raw_message=raw_message, context=context, skill_cards=cards)
+        selected_skills = [skill for skill in candidates if skill.get("name") in selected_names]
+        sticky_selected = next(
+            (
+                skill
+                for skill in selected_skills
+                if isinstance(skill.get("runtime"), dict) and skill.get("runtime", {}).get("sticky") is True
+            ),
+            None,
+        )
+        if sticky_selected:
+            context["_next_active_runtime_skill"] = normalize_text(sticky_selected.get("name"))
         context["_runtime_skill_candidates"] = cards
         context["_runtime_skill_selection_reason"] = reason
-        return [registry.skill_payload(skill) for skill in candidates if skill.get("name") in selected_names]
+        context["_runtime_skills_selected_names"] = selected_names
+        return [registry.skill_payload(skill) for skill in selected_skills]
+
+    def _runtime_skill_by_name(self, registry: RuntimeSkillRegistry, name: str) -> dict[str, Any]:
+        for skill in registry.enabled_skills():
+            if normalize_text(skill.get("name")) == name:
+                return skill
+        return {}
 
     def _auto_select_runtime_skill_names(self, skill_cards: list[dict[str, Any]]) -> tuple[list[str], str]:
         if len(skill_cards) != 1:
@@ -2723,6 +2830,7 @@ class KnowledgeStore:
             "runtime_skills_used": unique_values(plan.get("_runtime_skills_used", [])) if isinstance(plan.get("_runtime_skills_used"), list) else [],
             "runtime_skill_candidates": plan.get("_runtime_skill_candidates", []) if isinstance(plan.get("_runtime_skill_candidates"), list) else [],
             "runtime_skill_selection_reason": normalize_text(plan.get("_runtime_skill_selection_reason")),
+            "active_runtime_skill": normalize_text(plan.get("_active_runtime_skill")),
             "runtime_skills_enabled": bool(plan.get("_runtime_skills_enabled", True)),
         }
 
@@ -2925,6 +3033,7 @@ class KnowledgeStore:
             "pending_actions": {},
             "latest_pending_action_id": "",
             "active_teaching_session_id": "",
+            "active_runtime_skill": "",
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
@@ -3036,6 +3145,31 @@ class KnowledgeStore:
             return f"Mình đã hủy pending action `{action['id']}` ({action['type']})."
         rendered = ", ".join(f"`{action['id']}` ({action['type']})" for action in cancelled)
         return f"Mình đã hủy {len(cancelled)} pending actions: {rendered}."
+
+    def _handle_active_runtime_skill_cancel(self, *, chat_session: dict[str, Any], message: str) -> dict[str, Any]:
+        active_skill = normalize_text(chat_session.get("active_runtime_skill"))
+        if not active_skill or not self._is_chat_cancel(message):
+            return {}
+        chat_session["active_runtime_skill"] = ""
+        return self._finalize_chat_response(
+            {
+                "status": "cancelled",
+                "intent": "runtime_skill",
+                "answer": f"Mình đã tắt chế độ `{active_skill}` cho session này.",
+                "question": message,
+                "missing": [],
+                "used_knowledge_ids": [],
+                "used_dictionary_ids": [],
+                "used_example_ids": [],
+                "debug": {
+                    "llm_used": False,
+                    "fallback_used": False,
+                    "active_runtime_skill_cancelled": active_skill,
+                },
+            },
+            chat_session=chat_session,
+            requires_confirmation=False,
+        )
 
     def _handle_pending_status_query(self, *, chat_session: dict[str, Any], message: str) -> dict[str, Any]:
         if not self._is_pending_status_query(message):
@@ -3212,13 +3346,14 @@ class KnowledgeStore:
             payload["refinements"].append({"message": message, "created_at": now_iso()})
         action["payload"] = payload
         action["updated_at"] = now_iso()
+        natural_query = refined_message.replace(". Bổ sung:", ", ").replace("?.", "?").strip()
         response = {
             "status": "needs_confirmation",
             "intent": "data_sql",
             "answer": (
-                "Mình đã hiểu đây là phần bổ sung cho data query đang pending. "
-                f"Câu query hiện tại là: `{refined_message}`. "
-                f"Nếu đúng, nhắn `confirm` với `pending_action_id={action['id']}`; nếu muốn sửa tiếp thì cứ nhắn thêm."
+                f"Ok, mình hiểu yêu cầu hiện tại là: {natural_query}. "
+                "Trước khi mình tạo phần data/draft SQL, bạn xác nhận giúp mình nhé. "
+                "Nếu còn muốn đổi thời gian, cách tính, hoặc chiều breakdown thì cứ nhắn thêm."
             ),
             "question": refined_message,
             "missing": [
@@ -3267,6 +3402,91 @@ class KnowledgeStore:
             "time range",
         ]
         return any(marker in lowered for marker in markers)
+
+    def _data_query_clarification_items(self, message: str) -> list[dict[str, str]]:
+        lowered = normalize_lookup(message)
+        missing: list[dict[str, str]] = []
+        if not self._has_data_time_range(lowered):
+            missing.append(
+                {
+                    "type": "clarification",
+                    "concept": "time_range",
+                    "question": "Bạn muốn lấy số liệu cho khoảng thời gian nào?",
+                }
+            )
+        if not self._has_data_output_shape(lowered):
+            missing.append(
+                {
+                    "type": "clarification",
+                    "concept": "output_shape",
+                    "question": "Bạn muốn xem số tổng, xu hướng theo ngày/tuần/tháng, hay breakdown theo chiều nào?",
+                }
+            )
+        return missing
+
+    def _has_data_time_range(self, lowered_message: str) -> bool:
+        time_markers = [
+            "hom nay",
+            "hôm nay",
+            "hom qua",
+            "hôm qua",
+            "tuan nay",
+            "tuần này",
+            "thang nay",
+            "tháng này",
+            "quy nay",
+            "quý này",
+            "nam nay",
+            "năm nay",
+            "last ",
+            "recent ",
+            "yesterday",
+            "today",
+            "week",
+            "month",
+            "quarter",
+            "year",
+            "ngay ",
+            "ngày ",
+            "tuan ",
+            "tuần ",
+            "thang ",
+            "tháng ",
+            "quy ",
+            "quý ",
+            "nam ",
+            "năm ",
+        ]
+        if any(marker in lowered_message for marker in time_markers):
+            return True
+        return bool(re.search(r"\b(20\d{2}|q[1-4]|m[0-9]{1,2}|[0-9]{1,2}/[0-9]{1,2})\b", lowered_message))
+
+    def _has_data_output_shape(self, lowered_message: str) -> bool:
+        shape_markers = [
+            "theo ",
+            "by ",
+            "group by",
+            "breakdown",
+            "xu huong",
+            "xu hướng",
+            "trend",
+            "top ",
+            "rank",
+            "xep hang",
+            "xếp hạng",
+            "tong ",
+            "tổng ",
+            "total",
+            "average",
+            "trung binh",
+            "trung bình",
+            "so sanh",
+            "so sánh",
+        ]
+        if any(marker in lowered_message for marker in shape_markers):
+            return True
+        vague_number_markers = ["mot vai so", "một vài số", "vai so", "vài số", "some numbers"]
+        return not any(marker in lowered_message for marker in vague_number_markers)
 
     def _confirm_chat_action(self, *, chat_session: dict[str, Any], action: dict[str, Any], message: str) -> dict[str, Any]:
         action_type = action.get("type", "")
@@ -3419,6 +3639,27 @@ class KnowledgeStore:
         planner_debug: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         conversation_context = conversation_context or {}
+        clarification_items = self._data_query_clarification_items(message)
+        if clarification_items:
+            prefix = (normalize_text(planner_answer) + " ") if normalize_text(planner_answer) else ""
+            debug = planner_debug or {"llm_used": llm_used, "fallback_used": not llm_used}
+            response = {
+                "status": "needs_clarification",
+                "intent": "data_sql",
+                "answer": (
+                    prefix
+                    + "Mình cần bạn làm rõ thêm trước khi tạo yêu cầu data: "
+                    + " ".join(item["question"] for item in clarification_items)
+                ),
+                "question": message,
+                "missing": clarification_items,
+                "used_knowledge_ids": [item["id"] for item in context.get("knowledge", [])],
+                "used_dictionary_ids": [item["id"] for item in context.get("dictionary", [])],
+                "used_example_ids": [item["id"] for item in context.get("examples", [])],
+                "debug": {**debug, "data_query_clarification_before_confirmation": True},
+            }
+            self._attach_debug_context(response, context=context, chat_session=chat_session)
+            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
         action = self._create_pending_chat_action(
             chat_session,
             action_type="data_query",
@@ -3438,8 +3679,8 @@ class KnowledgeStore:
             "intent": "data_sql",
             "answer": (
                 prefix
-                + "Phần lấy data/draft SQL cần bạn confirm trước. Nếu muốn mình xử lý câu hỏi data này, nhắn `confirm` "
-                f"với `pending_action_id={action['id']}`; nếu không thì nhắn `cancel`."
+                + "Mình có thể chuẩn bị phần data/draft SQL cho câu này. "
+                "Trước khi xử lý, bạn xác nhận giúp mình nhé; nếu muốn đổi thời gian, cách tính, hoặc chiều breakdown thì cứ nhắn thêm."
             ),
             "question": message,
             "missing": [
@@ -3551,6 +3792,7 @@ class KnowledgeStore:
         response["context_backend"] = conversation_context.get("backend") or self.chat_context_backend
         if conversation_context.get("fallback_reason"):
             response.setdefault("debug", {})["context_fallback_reason"] = conversation_context["fallback_reason"]
+        self._apply_chat_answer_synthesis(response, chat_session=chat_session, pending_action=pending_action)
         self._append_assistant_context_event(chat_session, response.get("answer", ""))
         debug = response.setdefault("debug", {})
         debug["latency_ms"] = chat_session.get("_latency_ms", {})
@@ -3563,6 +3805,116 @@ class KnowledgeStore:
         if conversation_context.get("memory_errors"):
             debug["memory_errors"] = conversation_context.get("memory_errors")
         return response
+
+    def _apply_chat_answer_synthesis(
+        self,
+        response: dict[str, Any],
+        *,
+        chat_session: dict[str, Any],
+        pending_action: dict[str, Any] | None = None,
+    ) -> None:
+        debug = response.setdefault("debug", {})
+        if not self._llm_configured():
+            debug["answer_synthesis_used"] = False
+            debug["answer_synthesis_fallback_reason"] = "llm_not_configured"
+            response["answer"] = self._sanitize_user_answer(normalize_text(response.get("answer")))
+            return
+
+        fallback_answer = self._sanitize_user_answer(normalize_text(response.get("answer")))
+        payload = self._answer_synthesis_payload(response=response, chat_session=chat_session, pending_action=pending_action)
+        try:
+            synthesized = self.llm_client.complete_text(
+                system=(
+                    "You write the final user-facing answer for a Vietnamese business data agent. "
+                    "The Python state is already locked; do not change status, do not claim actions were executed, "
+                    "do not invent data, SQL, tables, columns, or metric definitions. "
+                    "Use the given locked_state, missing fields, and pending_action to write a natural answer. "
+                    "Never expose raw pending_action_id, internal state names, JSON, debug fields, or implementation details. "
+                    "When status is needs_dictionary or needs_knowledge, do not include SQL or claim the query is ready. "
+                    "If confirmation is required, naturally ask the user to confirm and mention they can still adjust details. "
+                    "If clarification is required, ask concise concrete questions. "
+                    "If runtime skill instructions are present, follow them for tone/protocol."
+                ),
+                user=json.dumps(payload, ensure_ascii=False),
+                temperature=0.2,
+            )
+        except (error.URLError, TimeoutError, ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
+            debug["answer_synthesis_used"] = False
+            debug["answer_synthesis_fallback_reason"] = "llm_error"
+            response["answer"] = fallback_answer
+            return
+
+        cleaned = self._sanitize_user_answer(synthesized)
+        if not cleaned:
+            debug["answer_synthesis_used"] = False
+            debug["answer_synthesis_fallback_reason"] = "empty_answer"
+            response["answer"] = fallback_answer
+            return
+        if self._answer_violates_locked_state(response, cleaned):
+            debug["answer_synthesis_used"] = False
+            debug["answer_synthesis_fallback_reason"] = "invalid_locked_state"
+            response["answer"] = fallback_answer
+            return
+        response["answer"] = cleaned
+        debug["answer_synthesis_used"] = True
+        debug["answer_synthesis_fallback_reason"] = ""
+
+    def _answer_synthesis_payload(
+        self,
+        *,
+        response: dict[str, Any],
+        chat_session: dict[str, Any],
+        pending_action: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        conversation_context = chat_session.get("_conversation_context") if isinstance(chat_session.get("_conversation_context"), dict) else {}
+        runtime_skills = []
+        active_skill_name = normalize_text(chat_session.get("active_runtime_skill"))
+        if active_skill_name:
+            registry = RuntimeSkillRegistry()
+            active_skill = self._runtime_skill_by_name(registry, active_skill_name)
+            if active_skill:
+                runtime_skills.append(registry.skill_payload(active_skill))
+        return {
+            "user_message": response.get("question", ""),
+            "draft_answer": response.get("answer", ""),
+            "locked_state": {
+                "status": response.get("status", ""),
+                "intent": response.get("intent", ""),
+                "requires_confirmation": bool(response.get("requires_confirmation")),
+                "pending_action_type": response.get("pending_action_type", ""),
+                "session_state": response.get("session_state", ""),
+            },
+            "pending_action": self._pending_action_planner_summary(pending_action) if pending_action else {},
+            "missing": response.get("missing", []),
+            "sql": response.get("sql") or "",
+            "knowledge": [self._compact_planner_knowledge(item) for item in response.get("knowledge", [])[:5]],
+            "dictionary": [self._compact_planner_dictionary(item) for item in response.get("dictionary", [])[:3]],
+            "examples": [self._compact_planner_example(item) for item in response.get("examples", [])[:3]],
+            "used_ids": {
+                "knowledge": response.get("used_knowledge_ids", []),
+                "dictionary": response.get("used_dictionary_ids", []),
+                "examples": response.get("used_example_ids", []),
+            },
+            "conversation": {
+                "history": conversation_context.get("conversation_history", [])[-6:],
+                "context_terms": conversation_context.get("context_terms", []),
+                "backend": conversation_context.get("backend", ""),
+            },
+            "runtime_skills": runtime_skills,
+        }
+
+    def _sanitize_user_answer(self, answer: str) -> str:
+        cleaned = normalize_text(answer)
+        cleaned = re.sub(r"`?pending_action_id\s*=\s*[^`\s,.;]+`?", "yêu cầu đang chờ xác nhận", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"Pending action id:\s*`?[^`\s,.;]+`?", "Yêu cầu này đang chờ xác nhận.", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip()
+
+    def _answer_violates_locked_state(self, response: dict[str, Any], answer: str) -> bool:
+        status = normalize_text(response.get("status"))
+        lowered = normalize_lookup(answer)
+        if status in {"needs_dictionary", "needs_knowledge"}:
+            return "```sql" in lowered or bool(re.search(r"\bselect\b.+\bfrom\b", lowered, flags=re.IGNORECASE | re.DOTALL))
+        return False
 
     def _elapsed_ms(self, started_at: float) -> float:
         return round((time.perf_counter() - started_at) * 1000, 2)
@@ -4011,6 +4363,8 @@ class KnowledgeStore:
         return unique_values(phrases)
 
     def _synthesize_data_answer(self, message: str, data_result: dict[str, Any]) -> str:
+        if data_result.get("status") in {"needs_dictionary", "needs_knowledge"}:
+            return self._synthesize_data_answer_deterministic(data_result)
         if self._llm_configured():
             compact = {
                 "status": data_result.get("status"),
@@ -4320,6 +4674,18 @@ class KnowledgeStore:
             "trung",
             "bình",
             "kỳ",
+            "chắc",
+            "nhé",
+            "lấy",
+            "thôi",
+            "một",
+            "vài",
+            "số",
+            "được",
+            "không",
+            "giúp",
+            "mình",
+            "tôi",
             "period",
             "reporting",
         }

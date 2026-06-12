@@ -41,6 +41,7 @@ class FakeChatLLM:
     def __init__(self, *, plans=None, text="LLM trả lời tự nhiên từ context.") -> None:
         self.plans = list(plans or [{"action": "answer_direct", "answer": text, "confidence": 0.9}])
         self.text = text
+        self.text_inputs = []
 
     def configured(self):
         return True
@@ -62,6 +63,27 @@ class FakeChatLLM:
         return {}
 
     def complete_text(self, *, system, user, temperature=0.2):
+        if "final user-facing answer" in system:
+            import json
+
+            payload = json.loads(user)
+            self.text_inputs.append({"system": system, "user": user, "temperature": temperature})
+            return payload.get("draft_answer") or self.text
+        self.text_inputs.append({"system": system, "user": user, "temperature": temperature})
+        return self.text
+
+
+class FailingTextLLM(FakeChatLLM):
+    def complete_text(self, *, system, user, temperature=0.2):
+        self.text_inputs.append({"system": system, "user": user, "temperature": temperature})
+        raise ValueError("text synthesis failed")
+
+
+class ViolatingSynthesisLLM(FakeChatLLM):
+    def complete_text(self, *, system, user, temperature=0.2):
+        self.text_inputs.append({"system": system, "user": user, "temperature": temperature})
+        if "final user-facing answer" in system:
+            return "```sql\nSELECT COUNT(*) FROM payment_air\n```"
         return self.text
 
 
@@ -80,6 +102,19 @@ class CapturingPlannerLLM(FakeChatLLM):
             import json
 
             self.planner_inputs.append(json.loads(user))
+        return super().complete_json(system=system, user=user, temperature=temperature)
+
+
+class ThinkWithMeLLM(CapturingPlannerLLM):
+    def complete_json(self, *, system, user, temperature=0):
+        if "select runtime skills" in system:
+            import json
+
+            data = json.loads(user)
+            self.skill_selector_inputs.append(data)
+            names = [item.get("name") for item in data.get("candidates", [])]
+            selected = ["think-with-me"] if "think-with-me" in names else []
+            return {"selected_skills": selected, "reason": "selected think-with-me for test" if selected else ""}
         return super().complete_json(system=system, user=user, temperature=temperature)
 
 
@@ -411,6 +446,20 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertIn("RPU", [item["concept"] for item in result["missing"]])
         self.assertNotIn("campaign", [item["concept"] for item in result["missing"]])
 
+    def test_missing_dictionary_data_answer_does_not_use_llm_sql(self):
+        store = self.make_store(llm_client=FakeChatLLM(text="```sql\nSELECT 1\n```"))
+
+        answer = store._synthesize_data_answer(
+            "PU tháng trước",
+            {
+                "status": "needs_dictionary",
+                "missing": [{"question": "PU lấy từ bảng/cột nào?"}],
+            },
+        )
+
+        self.assertIn("chưa đủ mapping", answer)
+        self.assertNotIn("SELECT 1", answer)
+
     def test_ask_data_question_with_enough_dictionary_returns_sql_draft(self):
         store = self.make_store()
         self.teach_rpu(store)
@@ -619,6 +668,50 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(payload["name"], "enabled-skill")
         self.assertIn("Use me", payload["instructions"][0])
 
+    def test_runtime_skill_registry_includes_think_with_me_skill(self):
+        registry = RuntimeSkillRegistry()
+
+        candidates = registry.query_candidates("think with me about a fuzzy campaign idea")
+
+        self.assertIn("think-with-me", [item["name"] for item in candidates])
+        skill = next(item for item in candidates if item["name"] == "think-with-me")
+        payload = registry.skill_payload(skill)
+        self.assertEqual(payload["name"], "think-with-me")
+        self.assertTrue(any("Interview the user relentlessly" in section for section in payload["instructions"]))
+
+    def test_runtime_skill_short_terms_require_token_match(self):
+        registry = RuntimeSkillRegistry()
+
+        candidates = registry.query_candidates("think with me about a fuzzy campaign idea")
+
+        self.assertNotIn("air-sql-analyst", [item["name"] for item in candidates])
+
+    def test_chat_sticks_active_runtime_skill_within_session(self):
+        llm = ThinkWithMeLLM(plan={"action": "answer_direct", "answer": "Is this what you mean?", "confidence": 0.9})
+        store = self.make_store(llm_client=llm)
+
+        first = store.chat(message="think with me about a fuzzy campaign idea", session_id="sticky-think")
+        second = store.chat(message="yes dung roi", session_id="sticky-think")
+
+        session = store._get_or_create_chat_session(session_id="sticky-think", user_id="")
+        self.assertEqual(session["active_runtime_skill"], "think-with-me")
+        self.assertEqual(first["debug"]["runtime_skills_used"], ["think-with-me"])
+        self.assertEqual(second["debug"]["runtime_skills_used"], ["think-with-me"])
+        self.assertEqual(second["debug"]["runtime_skill_selection_reason"], "using active runtime skill from session: think-with-me")
+        self.assertEqual(len(llm.skill_selector_inputs), 1)
+
+    def test_chat_cancel_clears_active_runtime_skill(self):
+        llm = ThinkWithMeLLM(plan={"action": "answer_direct", "answer": "Is this what you mean?", "confidence": 0.9})
+        store = self.make_store(llm_client=llm)
+
+        store.chat(message="think with me about a fuzzy campaign idea", session_id="sticky-cancel")
+        cancelled = store.chat(message="cancel", session_id="sticky-cancel")
+
+        session = store._get_or_create_chat_session(session_id="sticky-cancel", user_id="")
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["intent"], "runtime_skill")
+        self.assertEqual(session["active_runtime_skill"], "")
+
     def test_chat_data_question_routes_to_missing_dictionary_flow(self):
         store = self.make_store(
             llm_client=FakeChatLLM(
@@ -635,6 +728,8 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(result["status"], "needs_confirmation")
         self.assertTrue(result["requires_confirmation"])
         self.assertEqual(result["pending_action_type"], "data_query")
+        self.assertTrue(result["debug"]["answer_synthesis_used"])
+        self.assertNotIn("pending_action_id", result["answer"])
 
         confirmed = store.chat(
             message="confirm",
@@ -646,6 +741,30 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(confirmed["status"], "needs_dictionary")
         self.assertIn("mapping bảng/cột", confirmed["answer"])
 
+    def test_chat_vague_data_question_asks_clarification_before_confirmation(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "answer_and_propose_data_query",
+                        "answer": "PU là user có phát sinh giao dịch thành công.",
+                        "payload": {"resolved_message": "Vậy cho tôi biết một vài số của PU được không?"},
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+        store.teach_text(text="PU là Paying User, user có phát sinh giao dịch thành công.", stakeholder="BI")
+
+        result = store.chat(message="Vậy cho tôi biết một vài số của PU được không?", session_id="vague-pu")
+
+        self.assertEqual(result["intent"], "data_sql")
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertFalse(result["requires_confirmation"])
+        self.assertEqual(result["pending_action_id"], "")
+        self.assertTrue(result["debug"]["answer_synthesis_used"])
+        self.assertEqual([item["concept"] for item in result["missing"]], ["time_range", "output_shape"])
+
     def test_chat_refines_pending_data_query_from_clarification_answer(self):
         store = self.make_store(
             llm_client=FakeChatLLM(
@@ -653,7 +772,7 @@ class KnowledgeStoreTest(unittest.TestCase):
                     {
                         "action": "propose_data_query",
                         "answer": "",
-                        "payload": {"resolved_message": "Top route thực mua theo provider là gì?"},
+                        "payload": {"resolved_message": "Top route thực mua tháng 2 theo provider là gì?"},
                         "confidence": 0.9,
                     }
                 ]
@@ -661,7 +780,7 @@ class KnowledgeStoreTest(unittest.TestCase):
         )
 
         proposed = store.chat(
-            message="Top route thực mua theo provider là gì?",
+            message="Top route thực mua tháng 2 theo provider là gì?",
             user_id="quynh",
             session_id="pending-data-refine",
         )
@@ -675,8 +794,55 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(refined["pending_action_id"], proposed["pending_action_id"])
         self.assertEqual(refined["pending_action_type"], "data_query")
         self.assertIn("Top route thực mua", refined["question"])
+        self.assertIn("tháng 2", refined["question"])
         self.assertIn("Xếp hạng theo số giao dịch transID", refined["question"])
+        self.assertTrue(refined["debug"]["answer_synthesis_used"])
+        self.assertNotIn("pending_action_id", refined["answer"])
+        self.assertNotIn("pending", refined["answer"].lower())
         self.assertTrue(refined["debug"]["pending_action_refined"])
+
+    def test_chat_answer_synthesis_failure_falls_back_safely(self):
+        store = self.make_store(
+            llm_client=FailingTextLLM(
+                plans=[
+                    {
+                        "action": "propose_data_query",
+                        "answer": "",
+                        "payload": {"resolved_message": "RPU tháng 6 theo campaign là bao nhiêu?"},
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+        self.teach_rpu(store)
+
+        result = store.chat(message="RPU tháng 6 theo campaign là bao nhiêu?", session_id="synthesis-fallback")
+
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertFalse(result["debug"]["answer_synthesis_used"])
+        self.assertEqual(result["debug"]["answer_synthesis_fallback_reason"], "llm_error")
+        self.assertNotIn("pending_action_id", result["answer"])
+
+    def test_chat_answer_synthesis_rejects_sql_when_dictionary_missing(self):
+        store = self.make_store(llm_client=ViolatingSynthesisLLM())
+        session = store._get_or_create_chat_session(session_id="invalid-synthesis", user_id="")
+
+        result = store._finalize_chat_response(
+            {
+                "status": "needs_dictionary",
+                "intent": "data_sql",
+                "answer": "Mình hiểu ý câu hỏi, nhưng chưa đủ mapping bảng/cột để sinh SQL an toàn.",
+                "question": "PU tháng 2",
+                "missing": [{"type": "column_mapping", "concept": "PU", "question": "PU lấy từ bảng/cột nào?"}],
+                "debug": {},
+            },
+            chat_session=session,
+            requires_confirmation=False,
+        )
+
+        self.assertFalse(result["debug"]["answer_synthesis_used"])
+        self.assertEqual(result["debug"]["answer_synthesis_fallback_reason"], "invalid_locked_state")
+        self.assertNotIn("SELECT", result["answer"])
 
     def test_chat_mixed_definition_and_data_requires_data_confirmation(self):
         store = self.make_store(
