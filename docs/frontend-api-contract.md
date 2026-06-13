@@ -179,9 +179,11 @@ type ChatStatus =
   | "needs_clarification"
   | "needs_dictionary"
   | "needs_knowledge"
+  | "needs_example"        // data query confirm: có dictionary nhưng chưa có SQL example/LLM
   | "sql_draft"
   | "awaiting_confirmation"
   | "committed"
+  | "pending_approval"     // teaching commit: term đã tồn tại, tạo change request chờ duyệt
   | "cancelled"
   | "llm_required"
   | string;
@@ -194,6 +196,8 @@ type ChatIntent =
   | "conversation_recall"
   | "pending_status"
   | "runtime_skill"
+  | "clarification"        // ask_clarification hoặc noop từ planner
+  | "llm_required"         // LLM chưa cấu hình
   | string;
 
 interface PendingAction {
@@ -222,7 +226,7 @@ interface ChatResult {
   pending_action_type: string;
   pending_action: PendingAction;
   confirm_options: string[];
-  session_state: "idle" | "data_query_pending" | "teaching_draft_active" | string;
+  session_state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
   resolved_question: string;
   conversation_context_used: boolean;
   context_terms: string[];
@@ -252,7 +256,7 @@ Field dictionary cho FE:
 | `pending_action_type` | Có | Loại pending action, ví dụ `data_query`. |
 | `pending_action` | Có | Object chuẩn hóa cho pending action; tiện nếu FE muốn dùng một object thay vì các field flat. |
 | `confirm_options` | Có | Các lựa chọn hợp lệ, hiện thường là `["confirm", "cancel"]`. |
-| `session_state` | Optional | State tổng của session, ví dụ `idle`, `data_query_pending`, `teaching_draft_active`. |
+| `session_state` | Optional | State tổng của session: `idle`, `data_query_pending`, `teaching_pending` (start_teaching đang chờ confirm), `teaching_draft_active`. |
 | `resolved_question` | Optional | Câu hỏi đã được backend resolve từ context nếu có. |
 | `conversation_context_used` | Optional | `true` nếu backend dùng lịch sử chat để hiểu câu hiện tại. |
 | `context_terms` | Optional | Terms backend lấy từ context, ví dụ `["PU"]`. |
@@ -276,6 +280,8 @@ Field dictionary cho FE:
 | `needs_knowledge` | Render `answer`, show missing-domain-knowledge cards từ `missing`. Không show SQL. |
 | `sql_draft` | Render `answer`; nếu `sql` có value thì show SQL preview/copy button. |
 | `committed` | Render `answer`; có thể show success state. |
+| `pending_approval` | Render `answer`; teaching đã tạo change request vì term đã tồn tại. Show thông báo "chờ owner duyệt". |
+| `needs_example` | Render `answer`; đủ dictionary nhưng backend chưa có SQL example/LLM để sinh SQL. |
 | `cancelled` | Render `answer`; clear pending UI. |
 | `llm_required` | Render setup/error message; thường là môi trường backend thiếu LLM config. |
 
@@ -504,6 +510,20 @@ interface DebugContext {
   memory_timeout?: boolean;
   memory_latency_ms?: number;
   memory_errors?: string[];
+  // Planner fields (khi LLM planner được gọi)
+  planner_used?: boolean;
+  planner_action?: string;
+  planner_confidence?: number;
+  planner_fallback_reason?: string;
+  planner_reasoning_summary?: string;
+  // Runtime skill fields
+  runtime_skills_used?: string[];
+  runtime_skill_candidates?: unknown[];
+  runtime_skill_selection_reason?: string;
+  active_runtime_skill?: string;
+  runtime_skills_enabled?: boolean;
+  // Context backend
+  context_fallback_reason?: string;
   [key: string]: unknown;
 }
 ```
@@ -517,10 +537,17 @@ Useful debug fields:
 | `latency_ms.memory` | Thời gian hydrate/sync memory trước planner. |
 | `latency_ms.retrieval` | Thời gian search knowledge/dictionary/examples. |
 | `latency_ms.skill_select` | Thời gian chọn runtime skill. |
-| `latency_ms.planner` | Thời gian planner LLM. |
+| `latency_ms.planner` | Thời gian planner LLM. Absent khi fast-path bỏ qua planner. |
 | `latency_ms.execute` | Thời gian execute action/state. |
 | `latency_ms.total` | Tổng thời gian request chat. |
 | `memory_sync_status` | Trạng thái sync AgentBase Memory, ví dụ `user_synced + assistant_synced`. |
+| `planner_used` | `true` nếu LLM planner được gọi. |
+| `planner_action` | Action planner chọn: `answer_direct`, `ask_clarification`, `propose_data_query`, v.v. |
+| `planner_confidence` | Confidence score của planner (0–1). |
+| `planner_fallback_reason` | Lý do fallback planner, ví dụ `invalid_planner_action`, `forced_teaching_for_knowledge_write`. |
+| `runtime_skills_used` | Danh sách runtime skill đã dùng, ví dụ `["air-sql-analyst"]`. |
+| `active_runtime_skill` | Runtime skill đang active trong session. |
+| `context_fallback_reason` | Lý do context backend fall về local, ví dụ `missing_user_or_session`. |
 
 FE không nên render `debug` cho user cuối.
 
@@ -550,14 +577,19 @@ type SearchKnowledgeResponse = AgentApiResponse<{
 | Field | Ý nghĩa |
 | --- | --- |
 | `id` | Knowledge id. |
+| `kind` | Loại: `term`, `metric`, `synonym`. |
 | `name` | Tên metric/term, ví dụ `PU`, `RPU`. |
 | `canonical_definition` / `definition` | Định nghĩa chính. |
+| `logic` | Logic/cách tính chi tiết. |
 | `paraphrases` | Alias/cách gọi khác. |
+| `examples` | Ví dụ về cách dùng. |
+| `conditions` | Điều kiện áp dụng. |
 | `formula` | Công thức nếu có. |
 | `domain` | Domain nghiệp vụ. |
 | `owner` | Owner/team. |
 | `status` | Trạng thái knowledge. FE thường chỉ hiển thị approved records. |
 | `version` | Version knowledge. |
+| `created_at` / `updated_at` | Timestamp ISO. |
 
 ## 12. Storage Status
 

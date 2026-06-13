@@ -1321,6 +1321,7 @@ class KnowledgeStore:
             "If runtime_skills are present in the input, follow those instructions as domain-specific behavior rules. "
             "For data questions, propose a data query; Python will run guarded data flow only after user confirmation. "
             "If the user message is a short follow-up and a pending action is relevant, refine that pending action instead of treating the message as a new standalone question. "
+            "When the user wants to save, record, teach, or remember a definition/metric/term in any phrasing - including referring to something discussed earlier or telling you to go ahead - choose action 'propose_teaching' and put the FULL definition (assembled from the conversation if it was discussed earlier) into payload.message; do not merely use ask_clarification to ask whether to save. "
             "Output fields: action, answer, requires_confirmation, pending_action_type, payload, clarifying_questions, "
             "confidence, used_context_terms, reasoning_summary."
         )
@@ -1361,6 +1362,30 @@ class KnowledgeStore:
             parsed["clarifying_questions"] = []
         if not isinstance(parsed.get("used_context_terms"), list):
             parsed["used_context_terms"] = []
+        if self._message_requests_knowledge_write(raw_message) and parsed["action"] in {
+            "answer_direct",
+            "ask_clarification",
+            "recall_conversation",
+            "noop",
+        }:
+            # Giu lai cau tra loi cua planner neu no KHONG khang dinh sai la "da luu"
+            # (de bao toan phan trinh bay lai dinh nghia), neu khong thi dung cau de xuat chung.
+            existing_answer = normalize_text(parsed.get("answer"))
+            if self._answer_claims_knowledge_write(existing_answer):
+                existing_answer = ""
+            # Gom dinh nghia tu lich su hoi thoai: user co the dang yeu cau luu thu da ban tu truoc.
+            teaching_source = self._assemble_teaching_source(
+                raw_message=raw_message, conversation_context=conversation_context
+            )
+            parsed["action"] = "propose_teaching"
+            parsed["requires_confirmation"] = True
+            parsed["pending_action_type"] = "start_teaching"
+            parsed["payload"] = {"message": teaching_source or raw_message}
+            parsed["answer"] = existing_answer or (
+                "Mình hiểu bạn muốn lưu hoặc cập nhật một định nghĩa. "
+                "Bạn nhắn 'ok' để mình lưu vào từ điển nhé."
+            )
+            parsed["planner_fallback_reason"] = "forced_teaching_for_knowledge_write"
         parsed["_runtime_skills_used"] = [item.get("name", "") for item in compact_input.get("runtime_skills", []) if item.get("name")]
         parsed["_runtime_skill_candidates"] = compact_input.get("runtime_skill_candidates", [])
         parsed["_runtime_skill_selection_reason"] = compact_input.get("runtime_skill_selection_reason", "")
@@ -1566,6 +1591,29 @@ class KnowledgeStore:
         debug = self._planner_debug(plan)
 
         if action == "answer_direct":
+            if self._answer_claims_knowledge_write(planner_answer):
+                response = {
+                    "status": "needs_clarification",
+                    "intent": "clarification",
+                    "answer": (
+                        "Mình chưa lưu gì vào từ điển ở lượt này. "
+                        "Bạn gửi lại định nghĩa muốn lưu (tên + nghĩa ngắn gọn), mình sẽ lưu giúp ngay nhé."
+                    ),
+                    "question": raw_message,
+                    "missing": [
+                        {
+                            "type": "clarification",
+                            "concept": "teach_knowledge",
+                            "question": "Bạn muốn lưu hoặc cập nhật định nghĩa nào?",
+                        }
+                    ],
+                    "used_knowledge_ids": [item["id"] for item in context.get("knowledge", [])],
+                    "used_dictionary_ids": [item["id"] for item in context.get("dictionary", [])],
+                    "used_example_ids": [item["id"] for item in context.get("examples", [])],
+                    "debug": debug,
+                }
+                response.setdefault("debug", {})["knowledge_write_invariant_blocked"] = True
+                return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
             response = {
                 "status": "answered",
                 "intent": "planner_answer",
@@ -1666,7 +1714,7 @@ class KnowledgeStore:
                 response = {
                     "status": "needs_clarification",
                     "intent": "clarification",
-                    "answer": planner_answer or "Mình chưa thấy draft teaching nào đang active để append. Bạn muốn bắt đầu teaching session mới không?",
+                    "answer": planner_answer or "Mình chưa thấy định nghĩa nào đang soạn dở. Bạn muốn bắt đầu một định nghĩa mới không?",
                     "question": raw_message,
                     "missing": [],
                     "used_knowledge_ids": [],
@@ -1689,7 +1737,7 @@ class KnowledgeStore:
                 response = {
                     "status": "needs_clarification",
                     "intent": "clarification",
-                    "answer": planner_answer or "Mình chưa thấy draft teaching nào đang active để commit.",
+                    "answer": planner_answer or "Mình chưa thấy định nghĩa nào đang soạn dở để lưu.",
                     "question": raw_message,
                     "missing": [],
                     "used_knowledge_ids": [],
@@ -1698,25 +1746,19 @@ class KnowledgeStore:
                     "debug": {**debug, "planner_fallback_reason": "commit_without_active_teaching"},
                 }
                 return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
-            action_record = self._create_commit_teaching_action(chat_session, teaching_session_id=teaching_session_id)
-            response = {
-                "status": "needs_confirmation",
-                "intent": "teach_knowledge",
-                "answer": planner_answer or "Bạn confirm mình ghi draft teaching này vào KB chứ?",
-                "question": raw_message,
-                "missing": [
-                    {
-                        "type": "confirmation",
-                        "concept": "commit_teaching",
-                        "question": "Bạn confirm ghi draft teaching này vào KB chứ?",
-                    }
-                ],
-                "used_knowledge_ids": [],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": debug,
-            }
-            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action_record)
+            # User da co y dinh luu (qua planner) -> ghi thang neu du, khong hoi them mot lan nua.
+            try:
+                return self._auto_commit_teaching(
+                    chat_session=chat_session,
+                    teaching_session_id=teaching_session_id,
+                    message=raw_message,
+                )
+            except ValueError:
+                return self._teaching_needs_more_info_response(
+                    chat_session=chat_session,
+                    result={"session_id": teaching_session_id, "draft": {}, "status": "clarifying"},
+                    message=raw_message,
+                )
 
         response = {
             "status": "needs_clarification",
@@ -2124,6 +2166,53 @@ class KnowledgeStore:
             return f"Đang có 1 pending commit teaching chờ confirm cho session `{teaching_session_id}`. Pending action id: `{action['id']}`."
         return f"Đang có 1 pending action `{action.get('type')}` chờ confirm. Pending action id: `{action['id']}`."
 
+    def _recover_save_from_context(self, *, chat_session: dict[str, Any], message: str) -> dict[str, Any]:
+        """User xac nhan nhung khong con pending action. Neu agent vua de xuat luu mot dinh nghia,
+        dung lai noi dung tu hoi thoai va luu luon (vi user da xac nhan ro rang)."""
+        if not self._recent_assistant_proposed_save(chat_session):
+            return {}
+        source = self._assemble_teaching_source_from_session(chat_session)
+        if len(source) < 40:
+            return {}
+        try:
+            started = self.start_teach_session(
+                message=source,
+                stakeholder=chat_session.get("user_id", ""),
+                owner=chat_session.get("user_id", ""),
+            )
+        except ValueError:
+            return {}
+        if started.get("status") != "awaiting_confirmation":
+            # Chua trich xuat duoc dinh nghia day du -> de luong binh thuong hoi them, khong luu bua.
+            return {}
+        chat_session["active_teaching_session_id"] = started["session_id"]
+        return self._auto_commit_teaching(
+            chat_session=chat_session,
+            teaching_session_id=started["session_id"],
+            message=message,
+        )
+
+    def _assemble_teaching_source_from_session(self, chat_session: dict[str, Any]) -> str:
+        parts: list[str] = []
+        for msg in chat_session.get("messages", [])[-12:]:
+            if not isinstance(msg, dict):
+                continue
+            content = normalize_text(msg.get("content"))
+            if len(content) >= 40 and content not in parts:
+                parts.append(content)
+        return "\n\n".join(parts).strip()
+
+    def _recent_assistant_proposed_save(self, chat_session: dict[str, Any]) -> bool:
+        for msg in reversed(chat_session.get("messages", [])):
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") == "assistant":
+                low = normalize_lookup(msg.get("content"))
+                has_save = ("lưu" in low) or ("luu" in low) or ("ghi" in low)
+                has_target = any(k in low for k in ["định nghĩa", "dinh nghia", "từ điển", "tu dien", "metric", "knowledge"])
+                return has_save and has_target
+        return False
+
     def _handle_chat_confirmation(
         self,
         *,
@@ -2135,6 +2224,12 @@ class KnowledgeStore:
             return {}
         pending = self._pending_chat_actions(chat_session)
         if not pending:
+            # Khong con pending action nhung user dang xac nhan, va agent vua de xuat luu mot
+            # dinh nghia -> dung lai dinh nghia tu hoi thoai roi luu luon (pha vong lap "hoi mai").
+            if self._is_chat_confirmation(message) and not normalize_text(pending_action_id):
+                recovered = self._recover_save_from_context(chat_session=chat_session, message=message)
+                if recovered:
+                    return recovered
             return {}
 
         target_id = normalize_text(pending_action_id)
@@ -2415,84 +2510,54 @@ class KnowledgeStore:
             )
             chat_session["active_teaching_session_id"] = result["session_id"]
             action["status"] = "done"
-            commit_action = self._create_commit_teaching_action(chat_session, teaching_session_id=result["session_id"])
-            response = {
-                "status": result.get("status", "clarifying"),
-                "intent": "teach_knowledge",
-                "answer": self._build_teaching_chat_answer(result),
-                "question": message,
-                "session_id": result["session_id"],
-                "teaching_session": result.get("session"),
-                "draft": result.get("draft"),
-                "summary": result.get("summary"),
-                "missing": [],
-                "used_knowledge_ids": [],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
-            }
-            return self._finalize_chat_response(
-                response,
+            # User da xac nhan muon luu. Neu noi dung da du de ghi thi ghi luon,
+            # khong bat user xac nhan them mot lan nua (bo buoc commit thua).
+            if result.get("status") == "awaiting_confirmation":
+                return self._auto_commit_teaching(
+                    chat_session=chat_session,
+                    teaching_session_id=result["session_id"],
+                    message=message,
+                )
+            # Noi dung chua du de ghi -> hoi dung phan con thieu (day la hoi info, khong phai buoc xac nhan).
+            return self._teaching_needs_more_info_response(
                 chat_session=chat_session,
-                requires_confirmation=True,
-                pending_action=commit_action,
+                result=result,
+                message=message,
             )
 
         if action_type == "append_teaching":
             teaching_session_id = payload.get("teaching_session_id") or chat_session.get("active_teaching_session_id", "")
             result = self.append_teach_message(session_id=teaching_session_id, message=payload.get("message", ""))
             action["status"] = "done"
-            commit_action = self._create_commit_teaching_action(chat_session, teaching_session_id=teaching_session_id)
-            response = {
-                "status": result.get("status", "clarifying"),
-                "intent": "teach_knowledge",
-                "answer": self._build_teaching_chat_answer(result),
-                "question": message,
-                "session_id": teaching_session_id,
-                "teaching_session": result.get("session"),
-                "draft": result.get("draft"),
-                "summary": result.get("summary"),
-                "missing": [],
-                "used_knowledge_ids": [],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
-            }
-            return self._finalize_chat_response(
-                response,
+            if result.get("status") == "awaiting_confirmation":
+                return self._auto_commit_teaching(
+                    chat_session=chat_session,
+                    teaching_session_id=teaching_session_id,
+                    message=message,
+                )
+            return self._teaching_needs_more_info_response(
                 chat_session=chat_session,
-                requires_confirmation=True,
-                pending_action=commit_action,
+                result=result,
+                message=message,
             )
 
         if action_type == "commit_teaching":
+            # Van ho tro lenh commit tuong minh, nhung gio chi la fallback va cung
+            # ghi thang khong hoi lai. Neu draft chua du thi hoi them thay vi bao loi.
             teaching_session_id = payload.get("teaching_session_id") or chat_session.get("active_teaching_session_id", "")
-            result = self.confirm_teach_session(session_id=teaching_session_id, decision="confirm")
             action["status"] = "done"
-            chat_session["active_teaching_session_id"] = ""
-            answer = (
-                f"Đã ghi {len(result.get('knowledge_created', []))} knowledge mới vào KB."
-                if result.get("knowledge_created")
-                else f"Đã tạo {len(result.get('change_requests', []))} pending change cần review."
-                if result.get("change_requests")
-                else "Teaching session đã kết thúc."
-            )
-            response = {
-                "status": result.get("session", {}).get("status", "committed"),
-                "intent": "teach_knowledge",
-                "answer": answer,
-                "question": message,
-                "session_id": teaching_session_id,
-                "teaching_session": result.get("session"),
-                "knowledge_created": result.get("knowledge_created", []),
-                "change_requests": result.get("change_requests", []),
-                "missing": [],
-                "used_knowledge_ids": [item["id"] for item in result.get("knowledge_created", [])],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
-            }
-            return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+            try:
+                return self._auto_commit_teaching(
+                    chat_session=chat_session,
+                    teaching_session_id=teaching_session_id,
+                    message=message,
+                )
+            except ValueError:
+                return self._teaching_needs_more_info_response(
+                    chat_session=chat_session,
+                    result={"session_id": teaching_session_id, "draft": {}, "status": "clarifying"},
+                    message=message,
+                )
 
         if action_type == "data_query":
             result = self.ask_data_question(payload.get("message", ""))
@@ -2530,6 +2595,128 @@ class KnowledgeStore:
             chat_session=chat_session,
             requires_confirmation=False,
         )
+
+    def _auto_commit_teaching(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        teaching_session_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Ghi thang draft da san sang vao tu dien ngay sau khi user xac nhan, khong hoi lai.
+
+        - Knowledge moi: ghi truc tiep, bao "da luu".
+        - Knowledge da ton tai: tao yeu cau cap nhat cho nguoi phu trach duyet (khong ghi de),
+          va dien dat bang ngon ngu de hieu.
+        """
+        # Don cac pending commit_teaching cu (neu con) de khong con buoc xac nhan thua.
+        self._cancel_pending_chat_actions(
+            chat_session, action_type="commit_teaching", reason="auto_committed_after_confirm"
+        )
+        result = self.confirm_teach_session(session_id=teaching_session_id, decision="confirm")
+        chat_session["active_teaching_session_id"] = ""
+
+        knowledge_created = result.get("knowledge_created", [])
+        change_requests = result.get("change_requests", [])
+        fallback_term = (result.get("session", {}).get("draft", {}) or {}).get("name", "")
+        answer = self._plain_teaching_commit_answer(knowledge_created, change_requests, fallback_term)
+
+        response = {
+            "status": result.get("session", {}).get("status", "committed"),
+            "intent": "teach_knowledge",
+            "answer": answer,
+            "question": message,
+            "session_id": teaching_session_id,
+            "teaching_session": result.get("session"),
+            "knowledge_created": knowledge_created,
+            "change_requests": change_requests,
+            "missing": [],
+            "used_knowledge_ids": [item["id"] for item in knowledge_created],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+    def _teaching_needs_more_info_response(
+        self,
+        *,
+        chat_session: dict[str, Any],
+        result: dict[str, Any],
+        message: str,
+    ) -> dict[str, Any]:
+        """Khi noi dung chua du de luu: hoi dung phan con thieu bang ngon ngu de hieu.
+
+        Day KHONG phai buoc xac nhan thua - user da dong y luu, minh chi can them thong tin.
+        Teaching session van active nen luot tiep theo se duoc gom vao va tu dong luu khi du.
+        """
+        question = self._plain_teaching_question(result)
+        response = {
+            "status": "needs_clarification",
+            "intent": "teach_knowledge",
+            "answer": question,
+            "question": message,
+            "session_id": result.get("session_id"),
+            "teaching_session": result.get("session"),
+            "draft": result.get("draft"),
+            "summary": result.get("summary"),
+            "missing": [
+                {
+                    "type": "clarification",
+                    "concept": "teach_knowledge",
+                    "question": question,
+                }
+            ],
+            "used_knowledge_ids": [],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+        }
+        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
+
+    def _plain_teaching_commit_answer(
+        self,
+        knowledge_created: list[dict[str, Any]],
+        change_requests: list[dict[str, Any]],
+        fallback_term: str = "",
+    ) -> str:
+        """Thong bao ket qua luu bang ngon ngu de hieu (khong dung 'KB', 'commit', 'pending change')."""
+        if knowledge_created:
+            term = knowledge_created[0].get("name", "") or fallback_term
+            if term:
+                return (
+                    f'Xong rồi, mình đã lưu định nghĩa "{term}" vào từ điển. '
+                    "Từ giờ cả team có thể tra cứu hoặc hỏi mình về nó."
+                )
+            return "Xong rồi, mình đã lưu định nghĩa này vào từ điển. Cả team có thể tra cứu từ giờ."
+        if change_requests:
+            term = change_requests[0].get("name", "") or fallback_term
+            if term:
+                return (
+                    f'"{term}" đã có sẵn trong từ điển, nên mình ghi nhận nội dung mới thành một '
+                    "yêu cầu chỉnh sửa và chuyển cho người phụ trách duyệt trước khi thay định nghĩa cũ. "
+                    "Mình chưa thay đổi gì lên bản hiện tại cả."
+                )
+            return (
+                "Định nghĩa này đã có sẵn, nên mình ghi nhận thành một yêu cầu chỉnh sửa và "
+                "chuyển cho người phụ trách duyệt trước khi thay đổi. Mình chưa thay gì lên bản hiện tại cả."
+            )
+        return "Mình đã xử lý xong nội dung này."
+
+    def _plain_teaching_question(self, result: dict[str, Any]) -> str:
+        """Cau hoi bo sung thong tin, dien dat tu nhien (khong dung tu 'teaching session', 'draft', 'KB')."""
+        draft = result.get("draft") or {}
+        name = normalize_text(draft.get("name"))
+        if not name:
+            return (
+                "Mình cần thêm chút thông tin để lưu cho chính xác. "
+                "Bạn cho mình biết tên (term/metric) và nghĩa ngắn gọn của nó nhé."
+            )
+        if not normalize_text(draft.get("definition")):
+            return f'"{name}" nghĩa là gì trong nghiệp vụ? Bạn mô tả ngắn gọn giúp mình để mình lưu lại nhé.'
+        if not normalize_text(draft.get("domain")):
+            return f'"{name}" thuộc domain hoặc team nào vậy? Cho mình biết để lưu cho đúng nhé.'
+        return f'Bạn bổ sung thêm thông tin gì cho "{name}" không? Nếu đủ rồi mình lưu luôn.'
 
     def _create_commit_teaching_action(self, chat_session: dict[str, Any], *, teaching_session_id: str) -> dict[str, Any]:
         self._cancel_pending_chat_actions(chat_session, action_type="commit_teaching", reason="replaced_by_new_draft")
@@ -2626,15 +2813,15 @@ class KnowledgeStore:
             "status": "needs_confirmation",
             "intent": "teach_knowledge",
             "answer": normalize_text(planner_answer) or (
-                "Mình hiểu câu này có vẻ là bạn đang muốn dạy knowledge mới. "
-                "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ?"
+                "Mình hiểu là bạn muốn lưu định nghĩa này vào từ điển metric của team. "
+                "Bạn nhắn 'ok' để mình lưu nhé (hoặc 'không' nếu bạn chưa muốn lưu)."
             ),
             "question": message,
             "missing": [
                 {
                     "type": "confirmation",
                     "concept": "start_teaching",
-                    "question": "Bạn muốn mình bắt đầu teaching session từ nội dung này không?",
+                    "question": "Bạn muốn mình lưu định nghĩa này vào từ điển metric của team không?",
                 }
             ],
             "used_knowledge_ids": [],
@@ -2663,13 +2850,13 @@ class KnowledgeStore:
         response = {
             "status": "needs_confirmation",
             "intent": "teach_knowledge",
-            "answer": normalize_text(planner_answer) or "Mình hiểu đây có thể là phần bổ sung cho draft knowledge đang dạy. Bạn confirm mình append nội dung này vào draft chứ?",
+            "answer": normalize_text(planner_answer) or "Mình hiểu đây là phần bổ sung cho định nghĩa bạn đang soạn. Bạn nhắn 'ok' để mình thêm vào và lưu lại nhé.",
             "question": message,
             "missing": [
                 {
                     "type": "confirmation",
                     "concept": "append_teaching",
-                    "question": "Bạn muốn append nội dung này vào draft đang dạy không?",
+                    "question": "Bạn muốn mình thêm nội dung này vào định nghĩa đang soạn không?",
                 }
             ],
             "used_knowledge_ids": [],
@@ -2706,6 +2893,7 @@ class KnowledgeStore:
         if conversation_context.get("fallback_reason"):
             response.setdefault("debug", {})["context_fallback_reason"] = conversation_context["fallback_reason"]
         self._apply_chat_answer_synthesis(response, chat_session=chat_session, pending_action=pending_action)
+        self._enforce_knowledge_write_invariant(response)
         self._append_assistant_context_event(chat_session, response.get("answer", ""))
         debug = response.setdefault("debug", {})
         debug["latency_ms"] = chat_session.get("_latency_ms", {})
@@ -2738,18 +2926,19 @@ class KnowledgeStore:
         try:
             synthesized = self.llm_client.complete_text(
                 system=(
-                    "You write the final user-facing answer for a Vietnamese business data agent. "
-                    "The Python state is already locked; do not change status, do not claim actions were executed, "
-                    "do not invent data, SQL, tables, columns, or metric definitions. "
-                    "Use the given locked_state, missing fields, and pending_action to write a natural answer. "
-                    "Never expose raw pending_action_id, internal state names, JSON, debug fields, or implementation details. "
+                    "You write the final user-facing answer for a warm, helpful Vietnamese business-knowledge assistant chatting with a non-technical teammate. "
+                    "Write the reply yourself in natural, friendly Vietnamese and vary your wording - draft_answer is only a hint, never text to copy verbatim. "
+                    "Hard rules you must never break: the Python state is already locked, so do not change status and do not claim any action happened unless locked_state or teaching_outcome confirms it did; never invent data, SQL, tables, columns, or metric definitions. "
+                    "Use teaching_outcome to be specific and personable: if result is 'saved', confirm warmly and name the term (mention its definition/formula if given); "
+                    "if result is 'review_requested_existing_term', gently explain the term already exists so you created a change request for the owner to review and did not overwrite anything; "
+                    "if result is 'need_more_info', ask one short concrete question for the missing piece; "
+                    "if result is 'awaiting_user_confirmation', briefly restate what you understood and ask the user in a friendly way to confirm, noting they can still adjust. "
+                    "Never expose pending_action_id, internal state names, JSON, debug fields, or jargon like 'teaching session', 'draft', 'KB', 'commit', or 'pending change'; speak in plain business Vietnamese such as 'tu dien metric', 'luu lai', 'yeu cau duyet'. "
                     "When status is needs_dictionary or needs_knowledge, do not include SQL or claim the query is ready. "
-                    "If confirmation is required, naturally ask the user to confirm and mention they can still adjust details. "
-                    "If clarification is required, ask concise concrete questions. "
                     "If runtime skill instructions are present, follow them for tone/protocol."
                 ),
                 user=json.dumps(payload, ensure_ascii=False),
-                temperature=0.2,
+                temperature=0.3,
             )
         except (error.URLError, TimeoutError, ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
             debug["answer_synthesis_used"] = False
@@ -2771,6 +2960,37 @@ class KnowledgeStore:
         response["answer"] = cleaned
         debug["answer_synthesis_used"] = True
         debug["answer_synthesis_fallback_reason"] = ""
+
+    def _enforce_knowledge_write_invariant(self, response: dict[str, Any]) -> None:
+        if not self._answer_claims_knowledge_write(response.get("answer", "")):
+            return
+        if self._response_committed_knowledge(response):
+            return
+        response["status"] = "needs_clarification"
+        response["intent"] = "clarification"
+        response["requires_confirmation"] = False
+        response["pending_action_id"] = ""
+        response["pending_action_type"] = ""
+        response["confirm_options"] = []
+        response["missing"] = [
+            {
+                "type": "clarification",
+                "concept": "teach_knowledge",
+                "question": "Bạn muốn lưu hoặc cập nhật định nghĩa nào?",
+            }
+        ]
+        response["answer"] = (
+            "Mình chưa lưu gì vào từ điển ở lượt này. "
+            "Bạn gửi lại định nghĩa muốn lưu (tên + nghĩa ngắn gọn), mình sẽ xác nhận một lần rồi lưu giúp bạn."
+        )
+        response.setdefault("debug", {})["knowledge_write_invariant_blocked"] = True
+
+    def _response_committed_knowledge(self, response: dict[str, Any]) -> bool:
+        if response.get("intent") != "teach_knowledge":
+            return False
+        if response.get("status") != "committed":
+            return False
+        return bool(response.get("knowledge_created"))
 
     def _answer_synthesis_payload(
         self,
@@ -2814,7 +3034,36 @@ class KnowledgeStore:
                 "backend": conversation_context.get("backend", ""),
             },
             "runtime_skills": runtime_skills,
+            "teaching_outcome": self._teaching_outcome_for_synthesis(response),
         }
+
+    def _teaching_outcome_for_synthesis(self, response: dict[str, Any]) -> dict[str, Any]:
+        # Cung cap "su that ve ket qua" cho lop viet cau tra loi, de LLM noi tu nhien va chinh xac.
+        if response.get("intent") != "teach_knowledge":
+            return {}
+        created = response.get("knowledge_created") or []
+        changes = response.get("change_requests") or []
+        if created:
+            k = created[0] if isinstance(created[0], dict) else {}
+            return {
+                "result": "saved",
+                "term": k.get("name", ""),
+                "definition": k.get("canonical_definition") or k.get("definition", ""),
+                "formula": k.get("formula") or k.get("logic") or "",
+            }
+        if changes:
+            c = changes[0] if isinstance(changes[0], dict) else {}
+            return {"result": "review_requested_existing_term", "term": c.get("name", "")}
+        draft = response.get("draft") if isinstance(response.get("draft"), dict) else {}
+        summary = response.get("summary") if isinstance(response.get("summary"), dict) else {}
+        term = normalize_text(draft.get("name") or summary.get("term"))
+        definition_so_far = normalize_text(draft.get("definition") or summary.get("definition"))
+        status = response.get("status", "")
+        if status == "needs_confirmation":
+            return {"result": "awaiting_user_confirmation", "term": term, "definition_so_far": definition_so_far}
+        if status == "needs_clarification":
+            return {"result": "need_more_info", "term": term, "definition_so_far": definition_so_far}
+        return {"term": term, "definition_so_far": definition_so_far}
 
     def _sanitize_user_answer(self, answer: str) -> str:
         cleaned = normalize_text(answer)
@@ -2926,9 +3175,8 @@ class KnowledgeStore:
             "status": "needs_confirmation",
             "intent": "teach_knowledge",
             "answer": (
-                "Mình hiểu câu này có vẻ là bạn đang muốn dạy knowledge mới. "
-                "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ? "
-                "Nếu đồng ý, nhắn `confirm` với cùng `session_id`; nếu không thì nhắn `cancel`."
+                "Mình hiểu là bạn muốn lưu định nghĩa này vào từ điển metric của team. "
+                "Bạn nhắn 'ok' để mình lưu nhé (hoặc 'không' nếu bạn chưa muốn lưu)."
             ),
             "question": message,
             "session_id": session["id"],
@@ -2939,7 +3187,7 @@ class KnowledgeStore:
                 {
                     "type": "confirmation",
                     "concept": "teach_knowledge",
-                    "question": "Bạn muốn mình bắt đầu teaching session từ nội dung này không?",
+                    "question": "Bạn muốn mình lưu định nghĩa này vào từ điển metric của team không?",
                 }
             ],
             "used_knowledge_ids": [],
@@ -2974,7 +3222,7 @@ class KnowledgeStore:
                 return {
                     "status": "cancelled",
                     "intent": "teach_knowledge",
-                    "answer": "Mình đã hủy đề xuất dạy knowledge này, chưa parse và chưa ghi gì vào KB.",
+                    "answer": "Mình đã bỏ qua, chưa lưu gì vào từ điển cả.",
                     "question": message,
                     "session_id": cleaned_session_id,
                     "teaching_session": copy.deepcopy(session),
@@ -2988,7 +3236,7 @@ class KnowledgeStore:
                 return {
                     "status": "needs_confirmation",
                     "intent": "teach_knowledge",
-                    "answer": "Mình vẫn đang chờ bạn confirm có bắt đầu teaching session từ nội dung trước đó không. Nhắn `confirm` hoặc `cancel` nhé.",
+                    "answer": "Mình vẫn đang chờ bạn đồng ý lưu định nghĩa vừa rồi. Nhắn 'ok' để mình lưu, hoặc 'không' nếu bạn chưa muốn.",
                     "question": message,
                     "session_id": cleaned_session_id,
                     "teaching_session": copy.deepcopy(session),
@@ -2996,7 +3244,7 @@ class KnowledgeStore:
                         {
                             "type": "confirmation",
                             "concept": "teach_knowledge",
-                            "question": "Bạn muốn bắt đầu teaching session từ nội dung trước đó không?",
+                            "question": "Bạn muốn mình lưu định nghĩa vừa rồi không?",
                         }
                     ],
                     "used_knowledge_ids": [],
@@ -3007,6 +3255,9 @@ class KnowledgeStore:
             session["status"] = "clarifying"
             session = self._refresh_teaching_session(session)
             self._save_teaching_session(session)
+            # User da dong y luu -> neu noi dung da du thi luu thang, khong hoi lai.
+            if session.get("status") == "awaiting_confirmation":
+                return self._legacy_commit_teaching(cleaned_session_id, message, llm_used)
             result = self._teaching_session_response(session)
             return {
                 "status": result.get("status", "clarifying"),
@@ -3029,7 +3280,7 @@ class KnowledgeStore:
             return {
                 "status": "cancelled",
                 "intent": "teach_knowledge",
-                "answer": "Mình đã hủy teaching session này, chưa ghi gì vào KB.",
+                "answer": "Mình đã bỏ qua, chưa lưu gì vào từ điển cả.",
                 "question": message,
                 "session_id": cleaned_session_id,
                 "teaching_session": result.get("session"),
@@ -3040,33 +3291,15 @@ class KnowledgeStore:
                 "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
             }
         if self._is_chat_confirmation(message):
-            result = self.confirm_teach_session(session_id=cleaned_session_id, decision="confirm")
-            answer = (
-                f"Đã ghi {len(result.get('knowledge_created', []))} knowledge mới vào KB."
-                if result.get("knowledge_created")
-                else f"Đã tạo {len(result.get('change_requests', []))} pending change cần review."
-                if result.get("change_requests")
-                else "Teaching session đã kết thúc."
-            )
-            return {
-                "status": result.get("session", {}).get("status", "committed"),
-                "intent": "teach_knowledge",
-                "answer": answer,
-                "question": message,
-                "session_id": cleaned_session_id,
-                "teaching_session": result.get("session"),
-                "knowledge_created": result.get("knowledge_created", []),
-                "change_requests": result.get("change_requests", []),
-                "missing": [],
-                "used_knowledge_ids": [item["id"] for item in result.get("knowledge_created", [])],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-            }
-        if self._is_chat_summary_request(message):
+            return self._legacy_commit_teaching(cleaned_session_id, message, llm_used)
+        is_summary_request = self._is_chat_summary_request(message)
+        if is_summary_request:
             result = self.summarize_teach_session(session_id=cleaned_session_id)
         else:
             result = self.append_teach_message(session_id=cleaned_session_id, message=message)
+            # Sau khi bo sung ma noi dung da du thi luu thang, khong bat xac nhan lai.
+            if result.get("status") == "awaiting_confirmation":
+                return self._legacy_commit_teaching(cleaned_session_id, message, llm_used)
         return {
             "status": result.get("status", "clarifying"),
             "intent": "teach_knowledge",
@@ -3083,27 +3316,76 @@ class KnowledgeStore:
             "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
         }
 
+    def _legacy_commit_teaching(self, session_id: str, message: str, llm_used: bool) -> dict[str, Any]:
+        """Ghi thang draft vao tu dien cho luong teaching session truc tiep (khong qua pending action)."""
+        result = self.confirm_teach_session(session_id=session_id, decision="confirm")
+        knowledge_created = result.get("knowledge_created", [])
+        change_requests = result.get("change_requests", [])
+        fallback_term = (result.get("session", {}).get("draft", {}) or {}).get("name", "")
+        return {
+            "status": result.get("session", {}).get("status", "committed"),
+            "intent": "teach_knowledge",
+            "answer": self._plain_teaching_commit_answer(knowledge_created, change_requests, fallback_term),
+            "question": message,
+            "session_id": session_id,
+            "teaching_session": result.get("session"),
+            "knowledge_created": knowledge_created,
+            "change_requests": change_requests,
+            "missing": [],
+            "used_knowledge_ids": [item["id"] for item in knowledge_created],
+            "used_dictionary_ids": [],
+            "used_example_ids": [],
+            "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
+        }
+
     def _build_teaching_chat_answer(self, result: dict[str, Any]) -> str:
         if result.get("status") == "awaiting_confirmation":
             summary = result.get("summary") or {}
             term = summary.get("term") or result.get("draft", {}).get("name", "")
             definition = summary.get("definition") or result.get("draft", {}).get("definition", "")
             formula = summary.get("formula") or result.get("draft", {}).get("formula")
-            parts = [f"Mình hiểu bạn muốn dạy `{term}`: {definition}"] if term or definition else ["Mình đã tóm tắt được draft knowledge."]
+            parts = [f'Mình hiểu định nghĩa "{term}": {definition}'] if term or definition else ["Mình đã ghi nhận nội dung này."]
             if formula:
-                parts.append(f"Công thức/logic: {formula}.")
-            parts.append("Bạn nhắn `confirm` để ghi vào KB, hoặc bổ sung thêm nếu còn thiếu.")
+                parts.append(f"Cách tính: {formula}.")
+            parts.append("Nhắn 'ok' để mình lưu vào từ điển, hoặc bổ sung thêm nếu còn thiếu.")
             return " ".join(parts)
         question = result.get("question")
         if question:
-            return f"Mình cần làm rõ thêm trước khi ghi vào KB: {question}"
-        return "Mình đã nhận thêm thông tin. Bạn có thể nhắn `tóm tắt` để xem draft hoặc `confirm` để ghi vào KB."
+            return f"Mình cần thêm một chút thông tin trước khi lưu: {question}"
+        return "Mình đã ghi nhận thêm thông tin. Bạn nhắn 'tóm tắt' để xem lại, hoặc 'ok' để mình lưu vào từ điển."
 
     def _is_chat_confirmation(self, message: str) -> bool:
         lowered = normalize_lookup(message)
-        return lowered in {"confirm", "ok", "oke", "yes", "đồng ý", "duyệt", "chốt", "ghi vào kb", "lưu lại"} or any(
-            marker in lowered for marker in ["confirm đi", "lưu vào kb", "ghi vào knowledge", "ghi lại đi"]
-        )
+        if not lowered.strip():
+            return False
+        exact = {
+            "confirm", "ok", "oke", "okie", "okay", "okê", "yes", "yep", "yeah", "y",
+            "đồng ý", "dong y", "duyệt", "duyet", "chốt", "chot", "ừ", "ừm", "u", "uh", "um", "uk", "ukm",
+            "có", "co", "đúng", "dung", "đúng rồi", "dung roi",
+        }
+        if lowered in exact:
+            return True
+        confirm_markers = [
+            "confirm đi", "confirm di",
+            "lưu vào kb", "luu vao kb", "ghi vào knowledge", "ghi vao knowledge",
+            "ghi lại đi", "ghi lai di",
+            "lưu lại đi", "luu lai di", "lưu đi", "luu di",
+            "lưu giúp", "luu giup", "lưu giùm", "luu gium", "lưu hộ", "luu ho",
+            "lưu cho mình", "luu cho minh", "lưu cho tôi", "luu cho toi",
+            "lưu giùm mình", "luu gium minh", "lưu vào từ điển", "luu vao tu dien",
+            "đồng ý lưu", "dong y luu", "ok lưu", "ok luu", "oke lưu", "oke luu",
+            "ừ lưu", "u luu", "lưu nó", "luu no", "chốt lưu", "chot luu",
+            "save it", "save di", "go ahead", "proceed", "đồng ý nhé", "dong y nhe",
+            "xác nhận", "xac nhan", "đồng ý", "dong y", "chốt luôn", "chot luon",
+            "lưu luôn", "luu luon", "lưu đi", "luu di", "ừ lưu", "u luu",
+        ]
+        if any(marker in lowered for marker in confirm_markers):
+            return True
+        # Cau ngan bat dau bang tu xac nhan: "ok ...", "oke ...", "ừ ...", "yes ..."
+        tokens = re.sub(r"[^\w\s]", " ", lowered).split()
+        if tokens and tokens[0] in {"ok", "oke", "okie", "okay", "yes", "yep", "yeah", "ừ", "u", "uh", "um", "uk", "ukm"} and len(tokens) <= 8:
+            return True
+        return False
 
     def _is_chat_cancel(self, message: str) -> bool:
         lowered = normalize_lookup(message)
@@ -3125,6 +3407,108 @@ class KnowledgeStore:
                 "clear pending",
             ]
         )
+
+    def _assemble_teaching_source(self, *, raw_message: str, conversation_context: dict[str, Any] | None) -> str:
+        """Gom noi dung dinh nghia tu lich su hoi thoai de luu duoc khi dinh nghia da ban tu truoc.
+
+        Khi user noi "luu lai dinh nghia FPU nay gio", message hien tai thuong khong chua noi dung;
+        ta gop cac luot gan nhat co do dai dang dinh nghia + message hien tai lam nguon cho parser trich xuat.
+        """
+        history = conversation_context.get("conversation_history", []) if isinstance(conversation_context, dict) else []
+        parts: list[str] = []
+        for turn in history[-12:]:
+            if not isinstance(turn, dict):
+                continue
+            content = normalize_text(turn.get("content"))
+            if len(content) >= 40 and content not in parts:
+                parts.append(content)
+        current = normalize_text(raw_message)
+        if current and current not in parts:
+            parts.append(current)
+        return "\n\n".join(parts).strip()
+
+    def _message_requests_knowledge_write(self, message: str) -> bool:
+        lowered = normalize_lookup(message)
+        write_markers = [
+            "lưu định nghĩa",
+            "luu dinh nghia",
+            "lưu lại định nghĩa",
+            "luu lai dinh nghia",
+            "ghi lại định nghĩa",
+            "ghi lai dinh nghia",
+            "ghi nhận định nghĩa",
+            "ghi nhan dinh nghia",
+            "lưu vào từ điển",
+            "luu vao tu dien",
+            "lưu vào dictionary",
+            "lưu vào kb",
+            "luu vao kb",
+            "lưu knowledge",
+            "luu knowledge",
+            "ghi vào kb",
+            "ghi vao kb",
+            "ghi vào knowledge",
+            "ghi vao knowledge",
+            "cập nhật định nghĩa",
+            "cap nhat dinh nghia",
+            "bổ sung định nghĩa",
+            "bo sung dinh nghia",
+            "sửa định nghĩa",
+            "sua dinh nghia",
+            "thêm định nghĩa",
+            "them dinh nghia",
+            "lưu giúp",
+            "luu giup",
+            "lưu giùm",
+            "luu gium",
+            "lưu hộ",
+            "luu ho",
+            "lưu cho mình",
+            "luu cho minh",
+            "lưu cho tôi",
+            "luu cho toi",
+            "lưu lại định",
+            "lưu nó",
+            "luu no",
+            "lưu cái này",
+            "luu cai nay",
+            "lưu metric",
+            "luu metric",
+            "lưu term",
+            "luu term",
+            "lưu lại cho",
+            "luu lai cho",
+            "update definition",
+            "save definition",
+            "save this definition",
+            "store this definition",
+        ]
+        # Cac cum chung chung ("luu lai", "ghi lai") chi tinh la yeu cau luu knowledge
+        # khi co kem ngu canh ve dinh nghia/metric/term de tranh nhan nham.
+        generic_markers = ["lưu lại", "luu lai", "ghi lại", "ghi lai", "lưu giúp mình", "luu giup minh"]
+        knowledge_context = ["định nghĩa", "dinh nghia", "metric", "term", "khái niệm", "khai niem", "công thức", "cong thuc", "fpu", "rpu", "arppu", "aov"]
+        if any(marker in lowered for marker in write_markers):
+            return True
+        if any(marker in lowered for marker in generic_markers) and any(ctx in lowered for ctx in knowledge_context):
+            return True
+        return False
+
+    def _answer_claims_knowledge_write(self, answer: str) -> bool:
+        lowered = normalize_lookup(answer)
+        write_claims = [
+            "đã lưu",
+            "da luu",
+            "đã ghi",
+            "da ghi",
+            "đã được lưu",
+            "da duoc luu",
+            "đã cập nhật",
+            "da cap nhat",
+            "saved to",
+            "has been saved",
+        ]
+        knowledge_targets = ["kb", "knowledge", "từ điển", "tu dien", "dictionary", "metric"]
+        return any(claim in lowered for claim in write_claims) and any(target in lowered for target in knowledge_targets)
 
     def _is_pending_status_query(self, message: str) -> bool:
         lowered = normalize_lookup(message)

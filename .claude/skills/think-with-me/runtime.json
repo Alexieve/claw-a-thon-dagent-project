@@ -1,0 +1,38 @@
+{
+  "enabled": true,
+  "sticky": true,
+  "trigger_terms": [
+    "think with me",
+    "think-with-me",
+    "/think-with-me",
+    "help me think through",
+    "i need to figure out",
+    "figure out",
+    "think through",
+    "fuzzy idea",
+    "vague idea",
+    "not sure",
+    "chua ro",
+    "chưa rõ",
+    "suy nghi cung toi",
+    "suy nghĩ cùng tôi",
+    "giup toi nghi",
+    "giúp tôi nghĩ"
+  ],
+  "domains": [
+    "open-ended planning",
+    "clarity building",
+    "business strategy",
+    "campaign planning",
+    "process improvement",
+    "knowledge organization"
+  ],
+  "instruction_sections": [
+    "Overview",
+    "Protocol",
+    "Questioning principles",
+    "Red flags — you're doing it wrong",
+    "Trigger examples"
+  ],
+  "max_instruction_chars": 6000
+}

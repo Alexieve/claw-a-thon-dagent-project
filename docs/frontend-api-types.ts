@@ -47,9 +47,11 @@ export type ChatStatus =
   | "needs_clarification"
   | "needs_dictionary"
   | "needs_knowledge"
+  | "needs_example"
   | "sql_draft"
   | "awaiting_confirmation"
   | "committed"
+  | "pending_approval"
   | "cancelled"
   | "llm_required"
   | string;
@@ -62,7 +64,9 @@ export type ChatIntent =
   | "conversation_recall"
   | "pending_status"
   | "runtime_skill"
-  /** Future fast-path intents may be added; FE should not hard-switch UI on intent. */
+  | "clarification"
+  | "llm_required"
+  /** Future intents may be added; FE should not hard-switch UI on intent. */
   | string;
 
 export interface PendingAction {
@@ -104,6 +108,22 @@ export interface DebugContext {
   memory_timeout?: boolean;
   memory_latency_ms?: number;
   memory_errors?: string[];
+  /** LLM planner was invoked for this request. */
+  planner_used?: boolean;
+  /** Action selected by the planner: answer_direct, ask_clarification, propose_data_query, etc. */
+  planner_action?: string;
+  planner_confidence?: number;
+  /** Reason planner fell back to a safe default, e.g. invalid_planner_action, forced_teaching_for_knowledge_write. */
+  planner_fallback_reason?: string;
+  planner_reasoning_summary?: string;
+  /** Names of runtime skills that were active for this request. */
+  runtime_skills_used?: string[];
+  runtime_skill_candidates?: unknown[];
+  runtime_skill_selection_reason?: string;
+  active_runtime_skill?: string;
+  runtime_skills_enabled?: boolean;
+  /** Why context backend fell back to local (e.g. missing_user_or_session, memory_not_configured). */
+  context_fallback_reason?: string;
   [key: string]: unknown;
 }
 
@@ -129,7 +149,7 @@ export interface ChatResult {
   /** Valid confirmation commands for the pending action. */
   confirm_options: string[];
   /** High-level session state. */
-  session_state: "idle" | "data_query_pending" | "teaching_draft_active" | string;
+  session_state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
   /** Resolved question after context/follow-up handling. */
   resolved_question: string;
   /** True when previous chat context was used to understand this turn. */
@@ -158,15 +178,23 @@ export interface ChatResult {
 
 export interface KnowledgeRecord {
   id: string;
+  /** term | metric | synonym */
+  kind?: string;
   name: string;
   canonical_definition?: string;
+  /** Alias for canonical_definition in some legacy fields. */
   definition?: string;
+  logic?: string;
   paraphrases?: string[];
+  examples?: string[];
+  conditions?: string[];
   formula?: string;
   domain?: string;
   owner?: string;
   status?: string;
   version?: number;
+  created_at?: string;
+  updated_at?: string;
   [key: string]: unknown;
 }
 

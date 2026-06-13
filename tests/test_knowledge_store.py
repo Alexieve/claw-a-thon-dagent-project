@@ -1077,21 +1077,64 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertIn("business-knowledge-learning-agent", result["answer"])
         self.assertEqual(result["used_knowledge_ids"], [])
 
+    def test_chat_forces_teaching_when_user_requests_knowledge_write(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "answer_direct",
+                        "answer": "Đã lưu định nghĩa FPU vào từ điển metric.",
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+
+        result = store.chat(
+            message="Mình muốn lưu định nghĩa FPU là First Paying User vào từ điển metric của team",
+            user_id="quynh",
+            session_id="force-teach-1",
+        )
+
+        self.assertEqual(result["intent"], "teach_knowledge")
+        self.assertEqual(result["status"], "needs_confirmation")
+        self.assertEqual(result["pending_action_type"], "start_teaching")
+        self.assertTrue(result["requires_confirmation"])
+        self.assertEqual(store.search_knowledge("FPU"), [])
+
+    def test_chat_blocks_false_knowledge_write_claim_without_commit(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {
+                        "action": "answer_direct",
+                        "answer": "Đã lưu định nghĩa FPU vào từ điển metric của team.",
+                        "confidence": 0.9,
+                    }
+                ]
+            )
+        )
+
+        result = store.chat(message="Đúng vậy, mình xác nhận", user_id="quynh", session_id="false-save-1")
+
+        self.assertEqual(result["status"], "needs_clarification")
+        self.assertEqual(result["intent"], "clarification")
+        self.assertFalse(result["requires_confirmation"])
+        self.assertEqual(result["pending_action_id"], "")
+        self.assertIn("chưa lưu", result["answer"])
+        self.assertTrue(result["debug"]["knowledge_write_invariant_blocked"])
+        self.assertEqual(store.search_knowledge("FPU"), [])
+
     def test_chat_can_teach_confirmed_knowledge(self):
+        # Sau khi user xac nhan MOT lan, neu dinh nghia da du thi agent luu thang,
+        # khong tao them buoc xac nhan commit_teaching nua.
         store = self.make_store(
             llm_client=FakeChatLLM(
                 plans=[
                     {
                         "action": "propose_teaching",
-                        "answer": "Bạn confirm mình bắt đầu teaching session từ nội dung này chứ?",
+                        "answer": "Bạn nhắn 'ok' để mình lưu định nghĩa này vào từ điển nhé.",
                         "payload": {"message": "AOV là Average Order Value, giá trị đơn hàng trung bình."},
-                        "confidence": 0.9,
-                    },
-                    {"action": "answer_direct", "answer": "RPU là Revenue Per User.", "confidence": 0.9},
-                    {
-                        "action": "propose_append_teaching",
-                        "answer": "Bạn confirm mình append nội dung này vào draft chứ?",
-                        "payload": {"message": "Công thức là total revenue / total orders. Chỉ tính đơn thành công."},
                         "confidence": 0.9,
                     },
                 ]
@@ -1111,55 +1154,18 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(proposed["pending_action_type"], "start_teaching")
         self.assertEqual(store.search_knowledge("AOV"), [])
 
-        started = store.chat(
-            message="confirm",
+        # Mot lan xac nhan -> luu thang, khong con buoc xac nhan thu hai.
+        confirmed = store.chat(
+            message="ok",
             user_id="quynh",
             session_id=proposed["chat_session_id"],
             pending_action_id=proposed["pending_action_id"],
         )
 
-        self.assertEqual(started["intent"], "teach_knowledge")
-        self.assertEqual(started["status"], "awaiting_confirmation")
-        self.assertTrue(started["session_id"].startswith("teach_"))
-        self.assertTrue(started["requires_confirmation"])
-        self.assertEqual(started["pending_action_type"], "commit_teaching")
-
-        asked = store.chat(message="RPU là gì?", user_id="quynh", session_id=proposed["chat_session_id"])
-
-        self.assertEqual(asked["status"], "answered")
-        self.assertEqual(asked["intent"], "planner_answer")
-        self.assertEqual(asked["session_state"], "teaching_draft_active")
-
-        appended = store.chat(
-            message="Công thức là total revenue / total orders. Chỉ tính đơn thành công.",
-            user_id="quynh",
-            session_id=proposed["chat_session_id"],
-        )
-
-        self.assertEqual(appended["intent"], "teach_knowledge")
-        self.assertEqual(appended["status"], "needs_confirmation")
-        self.assertEqual(appended["pending_action_type"], "append_teaching")
-
-        appended_confirmed = store.chat(
-            message="confirm",
-            user_id="quynh",
-            session_id=proposed["chat_session_id"],
-            pending_action_id=appended["pending_action_id"],
-        )
-
-        self.assertEqual(appended_confirmed["intent"], "teach_knowledge")
-        self.assertEqual(appended_confirmed["status"], "awaiting_confirmation")
-        self.assertEqual(appended_confirmed["pending_action_type"], "commit_teaching")
-
-        confirmed = store.chat(
-            message="confirm",
-            user_id="quynh",
-            session_id=proposed["chat_session_id"],
-            pending_action_id=appended_confirmed["pending_action_id"],
-        )
-
         self.assertEqual(confirmed["intent"], "teach_knowledge")
         self.assertEqual(confirmed["status"], "committed")
+        self.assertFalse(confirmed["requires_confirmation"])
+        self.assertEqual(confirmed["pending_action_type"], "")
         self.assertEqual(store.search_knowledge("AOV")[0]["name"], "AOV")
 
     def test_chat_new_pending_replaces_previous_pending_action(self):
