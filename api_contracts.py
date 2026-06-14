@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Callable, Protocol
 
 
-PUBLIC_FE_ACTIONS = {"chat", "search_knowledge", "storage_status"}
+PUBLIC_FE_ACTIONS = {"chat", "search_knowledge", "storage_status", "list_chat_sessions", "get_chat_history"}
 
 
 class RequestContextLike(Protocol):
@@ -101,6 +101,8 @@ class AgentApiRouter:
         self._register("search_question_examples", "Tim SQL mau.", False, self._search_question_examples)
         self._register("list_question_examples", "Liet ke question examples da luu.", False, self._list_question_examples)
         self._register("storage_status", "Kiem tra storage backend.", True, self._storage_status)
+        self._register("list_chat_sessions", "Lay danh sach chat session theo user_id.", True, self._list_chat_sessions)
+        self._register("get_chat_history", "Lay lich su chat day du theo session_id.", True, self._get_chat_history)
         self._register("analyze_text", "Phan tich text dua tren knowledge da co.", False, self._analyze_text)
         self._register("ingest_document", "Ingest noi dung file dang text.", False, self._ingest_document)
 
@@ -253,6 +255,14 @@ class AgentApiRouter:
 
     def _storage_status(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
         return self.store.storage_status()
+
+    def _list_chat_sessions(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
+        user_id = self._text(payload.get("user_id") or self._context_value(context, "user_id"))
+        return {"sessions": self.store.list_chat_sessions_by_user(user_id=user_id)}
+
+    def _get_chat_history(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
+        session_id = self._text(payload.get("session_id") or self._context_value(context, "session_id"))
+        return self.store.get_chat_history(session_id=session_id)
 
     def _analyze_text(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
         analysis = self.store.analyze_text(self._text(payload.get("text") or payload.get("message")))

@@ -174,6 +174,56 @@ class KnowledgeStore:
             "chat_context_fallback_on_memory_error": self.chat_context_fallback_on_error,
         }
 
+    def list_chat_sessions_by_user(self, user_id: str = "") -> list[dict[str, Any]]:
+        data = self._load_chat_sessions()
+        normalized_uid = normalize_text(user_id)
+        sessions = []
+        for session in data.get("sessions", {}).values():
+            if normalized_uid and normalize_text(session.get("user_id")) != normalized_uid:
+                continue
+            messages = session.get("messages", []) if isinstance(session.get("messages"), list) else []
+            last_message = ""
+            for msg in reversed(messages):
+                if isinstance(msg, dict) and normalize_text(msg.get("content")):
+                    last_message = normalize_text(msg["content"])
+                    break
+            sessions.append({
+                "id": session.get("id", ""),
+                "user_id": session.get("user_id", ""),
+                "state": session.get("state", "idle"),
+                "message_count": len(messages),
+                "last_message": last_message[:200],
+                "active_teaching_session_id": session.get("active_teaching_session_id", ""),
+                "created_at": session.get("created_at", ""),
+                "updated_at": session.get("updated_at", ""),
+            })
+        sessions.sort(key=lambda s: s.get("updated_at") or "", reverse=True)
+        return sessions
+
+    def get_chat_history(self, session_id: str = "") -> dict[str, Any]:
+        cleaned_id = normalize_text(session_id)
+        if not cleaned_id:
+            raise ValueError("session_id la bat buoc")
+        data = self._load_chat_sessions()
+        session = data.get("sessions", {}).get(cleaned_id)
+        if not session:
+            raise ValueError(f"Khong tim thay session: {cleaned_id}")
+        messages = session.get("messages", []) if isinstance(session.get("messages"), list) else []
+        return {
+            "session_id": session.get("id", cleaned_id),
+            "user_id": session.get("user_id", ""),
+            "state": session.get("state", "idle"),
+            "message_count": len(messages),
+            "messages": [
+                {"role": msg.get("role", ""), "content": msg.get("content", "")}
+                for msg in messages
+                if isinstance(msg, dict)
+            ],
+            "active_teaching_session_id": session.get("active_teaching_session_id", ""),
+            "created_at": session.get("created_at", ""),
+            "updated_at": session.get("updated_at", ""),
+        }
+
     def teach_text(
         self,
         *,
@@ -2935,7 +2985,8 @@ class KnowledgeStore:
                     "if result is 'awaiting_user_confirmation', briefly restate what you understood and ask the user in a friendly way to confirm, noting they can still adjust. "
                     "Never expose pending_action_id, internal state names, JSON, debug fields, or jargon like 'teaching session', 'draft', 'KB', 'commit', or 'pending change'; speak in plain business Vietnamese such as 'tu dien metric', 'luu lai', 'yeu cau duyet'. "
                     "When status is needs_dictionary or needs_knowledge, do not include SQL or claim the query is ready. "
-                    "If runtime skill instructions are present, follow them for tone/protocol."
+                    "If runtime skill instructions are present, follow them for tone/protocol. "
+                    "Format your reply using Markdown: use **bold** for key terms and metric names, bullet lists (- item) for enumerations, and fenced code blocks (``` sql ... ```) for any SQL snippets. Plain prose is fine for short single-sentence replies."
                 ),
                 user=json.dumps(payload, ensure_ascii=False),
                 temperature=0.3,
@@ -3676,7 +3727,8 @@ class KnowledgeStore:
             system = (
                 "You explain data-question results in natural Vietnamese. Use only the provided result. "
                 "If status is needs_dictionary or needs_knowledge, clearly say what is missing. "
-                "If SQL exists, explain it is a draft and mention key assumptions."
+                "If SQL exists, explain it is a draft and mention key assumptions. "
+                "Format your reply using Markdown: use **bold** for key terms and metric names, bullet lists (- item) for enumerations, and fenced code blocks (``` sql ... ```) for any SQL snippets."
             )
             answer = self.llm_client.complete_text(
                 system=system,

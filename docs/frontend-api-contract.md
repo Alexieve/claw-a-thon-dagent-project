@@ -75,6 +75,8 @@ if (response.status === "error") {
 | `chat` | Có | Chat chính, follow-up, confirm/cancel, teaching qua chat. |
 | `search_knowledge` | Có, optional | Search panel hoặc source lookup. |
 | `storage_status` | Có, diagnostics | Kiểm tra backend đang dùng JSON/Postgres/Supabase. |
+| `list_chat_sessions` | Có | Lấy danh sách chat session của một user. |
+| `get_chat_history` | Có | Lấy toàn bộ lịch sử chat theo session_id. |
 
 Các action admin khác không cần dùng trong Chat UI phase này.
 
@@ -625,7 +627,141 @@ type StorageStatusResponse = AgentApiResponse<{
 | `chat_context_event_limit` | Số event gần nhất dùng làm context. |
 | `chat_context_fallback_on_memory_error` | Backend có fallback khi memory lỗi hay không. |
 
-## 13. FE Integration Checklist
+## 13. List Chat Sessions
+
+Lấy danh sách chat session của một user, sắp xếp theo `updated_at` mới nhất trước.
+
+Request:
+
+```json
+{
+  "action": "list_chat_sessions",
+  "user_id": "quynhvm"
+}
+```
+
+`user_id` là optional — nếu bỏ trống, backend trả tất cả sessions. FE nên luôn truyền `user_id` để chỉ lấy session của user hiện tại.
+
+Response:
+
+```ts
+interface ChatSessionSummary {
+  id: string;
+  user_id: string;
+  state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
+  message_count: number;
+  last_message: string;          // Nội dung message gần nhất (tối đa 200 ký tự), dùng cho preview
+  active_teaching_session_id: string;
+  created_at: string;            // ISO timestamp
+  updated_at: string;            // ISO timestamp
+}
+
+type ListChatSessionsResponse = AgentApiResponse<{
+  sessions: ChatSessionSummary[];
+}>;
+```
+
+Ví dụ response:
+
+```json
+{
+  "status": "success",
+  "timestamp": "2026-06-14T10:00:00",
+  "session_id": null,
+  "result": {
+    "sessions": [
+      {
+        "id": "chat_abc123",
+        "user_id": "quynhvm",
+        "state": "idle",
+        "message_count": 8,
+        "last_message": "Mình đã lưu RPU vào từ điển metric rồi nhé.",
+        "active_teaching_session_id": "",
+        "created_at": "2026-06-13T09:00:00",
+        "updated_at": "2026-06-14T09:45:00"
+      },
+      {
+        "id": "chat_def456",
+        "user_id": "quynhvm",
+        "state": "data_query_pending",
+        "message_count": 4,
+        "last_message": "Bạn confirm để mình chuẩn bị draft SQL nhé.",
+        "active_teaching_session_id": "",
+        "created_at": "2026-06-14T08:00:00",
+        "updated_at": "2026-06-14T08:30:00"
+      }
+    ]
+  }
+}
+```
+
+FE dùng để render danh sách cuộc hội thoại trong sidebar/history panel. Dùng `id` để load lại session khi user chọn.
+
+## 14. Get Chat History
+
+Lấy toàn bộ lịch sử tin nhắn của một session.
+
+Request:
+
+```json
+{
+  "action": "get_chat_history",
+  "session_id": "chat_abc123"
+}
+```
+
+`session_id` là bắt buộc. Nếu không truyền hoặc session không tồn tại, API trả `status: "error"`.
+
+Response:
+
+```ts
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatHistoryResult {
+  session_id: string;
+  user_id: string;
+  state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
+  message_count: number;
+  messages: ChatMessage[];
+  active_teaching_session_id: string;
+  created_at: string;   // ISO timestamp
+  updated_at: string;   // ISO timestamp
+}
+
+type GetChatHistoryResponse = AgentApiResponse<ChatHistoryResult>;
+```
+
+Ví dụ response:
+
+```json
+{
+  "status": "success",
+  "timestamp": "2026-06-14T10:00:00",
+  "session_id": "chat_abc123",
+  "result": {
+    "session_id": "chat_abc123",
+    "user_id": "quynhvm",
+    "state": "idle",
+    "message_count": 4,
+    "messages": [
+      { "role": "user", "content": "RPU là gì?" },
+      { "role": "assistant", "content": "**RPU** (Revenue Per User) là doanh thu trung bình trên mỗi user active trong kỳ." },
+      { "role": "user", "content": "Tháng 6/2026 RPU là bao nhiêu?" },
+      { "role": "assistant", "content": "Mình hiểu bạn muốn lấy số liệu RPU tháng 6/2026. Bạn xác nhận để mình chuẩn bị draft SQL nhé." }
+    ],
+    "active_teaching_session_id": "",
+    "created_at": "2026-06-13T09:00:00",
+    "updated_at": "2026-06-14T09:45:00"
+  }
+}
+```
+
+FE dùng để render lại toàn bộ nội dung hội thoại khi user quay lại session cũ. Messages đã được sắp xếp theo thứ tự thời gian (cũ nhất trước).
+
+## 15. FE Integration Checklist
 
 - Luôn gửi `session_id` ổn định cho một conversation.
 - Sau mỗi chat response, lưu `result.chat_session_id`.
