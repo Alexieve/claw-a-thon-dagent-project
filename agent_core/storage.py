@@ -131,7 +131,7 @@ class PostgresStorage:
             conn.commit()
 
     def _connect(self):
-        return psycopg.connect(self.database_url, prepare_threshold=None)
+        return psycopg.connect(self.database_url, prepare_threshold=None, connect_timeout=10)
 
     def _upsert_knowledge(self, cur, record: dict[str, Any]) -> None:
         cur.execute(

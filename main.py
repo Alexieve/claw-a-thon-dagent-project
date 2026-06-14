@@ -46,9 +46,15 @@ def health_check() -> PingStatus:
     return PingStatus.HEALTHY
 
 
-if __name__ == "__main__":
+@app.on_event("startup")
+async def on_startup():
+    import asyncio
     try:
-        store.bootstrap()
+        await asyncio.get_event_loop().run_in_executor(None, store.bootstrap)
+        print("[startup] bootstrap OK", flush=True)
     except Exception as exc:
         print(f"[startup] bootstrap warning: {exc}", flush=True)
+
+
+if __name__ == "__main__":
     app.run(port=int(os.getenv("PORT", "8080")), host="0.0.0.0")

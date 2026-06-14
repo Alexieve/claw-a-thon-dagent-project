@@ -2060,7 +2060,10 @@ class KnowledgeStore:
         ]:
             persisted.pop(key, None)
         data["sessions"][session["id"]] = persisted
-        self._save_json(self.chat_sessions_path, data)
+        if self.db:
+            self.db.save_chat_sessions(data)
+        else:
+            self._save_json(self.chat_sessions_path, data)
 
     def _append_chat_message(self, session: dict[str, Any], *, role: str, content: str) -> None:
         session.setdefault("messages", [])
