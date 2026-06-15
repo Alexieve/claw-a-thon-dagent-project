@@ -540,8 +540,11 @@ Useful debug fields:
 | `latency_ms.retrieval` | Thời gian search knowledge/dictionary/examples. |
 | `latency_ms.skill_select` | Thời gian chọn runtime skill. |
 | `latency_ms.planner` | Thời gian planner LLM. Absent khi fast-path bỏ qua planner. |
+| `latency_ms.answer_synthesis` | Thời gian viết lại answer cuối bằng LLM hoặc quyết định bỏ qua synthesis. |
 | `latency_ms.execute` | Thời gian execute action/state. |
-| `latency_ms.total` | Tổng thời gian request chat. |
+| `latency_ms.save` | Thời gian lưu chat session sau khi response đã finalize. |
+| `latency_ms.total` | Tổng thời gian request chat trước bước save cuối. |
+| `latency_ms.total_with_save` | Tổng thời gian request chat bao gồm cả bước save cuối. |
 | `memory_sync_status` | Trạng thái sync AgentBase Memory, ví dụ `user_synced + assistant_synced`. |
 | `planner_used` | `true` nếu LLM planner được gọi. |
 | `planner_action` | Action planner chọn: `answer_direct`, `ask_clarification`, `propose_data_query`, v.v. |

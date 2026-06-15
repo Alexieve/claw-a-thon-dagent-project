@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,11 @@ try:
 except ImportError:  # pragma: no cover - optional dependency for JSON-only local mode
     psycopg = None
     dict_row = None
+
+try:
+    from psycopg_pool import ConnectionPool
+except ImportError:  # pragma: no cover - optional; falls back to per-call connections
+    ConnectionPool = None
 
 from .constants import SCHEMA_PATH
 from .utils import now_iso
@@ -21,6 +27,20 @@ class PostgresStorage:
             raise RuntimeError("psycopg is required for DATABASE_URL storage")
         self.database_url = database_url
         self.schema_path = schema_path
+        # Connection pool tái dùng kết nối tới Postgres remote (Supabase), tránh TCP+TLS
+        # handshake mỗi thao tác. Mở non-blocking (wait=False) để không chặn startup khi DB
+        # tạm thời unreachable; pool.connection() sẽ chờ tối đa `timeout` để lấy được kết nối.
+        self._pool = None
+        if ConnectionPool is not None:
+            self._pool = ConnectionPool(
+                self.database_url,
+                min_size=1,
+                max_size=int(os.getenv("DB_POOL_MAX_SIZE") or "10"),
+                open=False,
+                timeout=10,
+                kwargs={"prepare_threshold": None, "connect_timeout": 10},
+            )
+            self._pool.open()
 
     def bootstrap(self) -> None:
         with self._connect() as conn:
@@ -80,12 +100,26 @@ class PostgresStorage:
                 rows = cur.fetchall()
         return {"schema_version": 1, "sessions": {row["payload"]["id"]: row["payload"] for row in rows}}
 
+    def load_chat_session(self, session_id: str) -> dict[str, Any] | None:
+        """Point lookup theo primary key thay vì quét toàn bảng. Trả về payload hoặc None."""
+        with self._connect() as conn:
+            with conn.cursor(row_factory=dict_row) as cur:
+                cur.execute("select payload from chat_sessions where id = %s", (session_id,))
+                row = cur.fetchone()
+        return row["payload"] if row else None
+
     def save_chat_sessions(self, data: dict[str, Any]) -> None:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute("delete from chat_sessions")
                 for session in data.get("sessions", {}).values():
                     self._upsert_chat_session(cur, session)
+            conn.commit()
+
+    def save_chat_session(self, session: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._upsert_chat_session(cur, session)
             conn.commit()
 
     def load_data_dictionary(self) -> dict[str, Any]:
@@ -131,6 +165,8 @@ class PostgresStorage:
             conn.commit()
 
     def _connect(self):
+        if self._pool is not None:
+            return self._pool.connection()
         return psycopg.connect(self.database_url, prepare_threshold=None, connect_timeout=10)
 
     def _upsert_knowledge(self, cur, record: dict[str, Any]) -> None:

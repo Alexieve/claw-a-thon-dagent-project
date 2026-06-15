@@ -99,7 +99,7 @@ export interface DebugContext {
   answer_synthesis_used?: boolean;
   /** Fallback reason: llm_error, empty_answer, invalid_locked_state, llm_not_configured. */
   answer_synthesis_fallback_reason?: string;
-  /** Per-stage latency in milliseconds: memory, retrieval, skill_select, planner, execute, total. */
+  /** Per-stage latency in milliseconds: memory, retrieval, skill_select, planner, answer_synthesis, execute, save, total, total_with_save. */
   latency_ms?: Record<string, number>;
   conversation_history_used?: boolean;
   conversation_history_turns?: number;

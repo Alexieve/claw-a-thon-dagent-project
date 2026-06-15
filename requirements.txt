@@ -1,4 +1,6 @@
 greennode-agentbase
 python-dotenv
 psycopg[binary]
+psycopg_pool
+httpx
 openpyxl

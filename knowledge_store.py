@@ -85,6 +85,12 @@ class KnowledgeStore:
         self.question_examples_path = Path(question_examples_path)
         self.database_url = normalize_text(database_url if database_url is not None else os.getenv("DATABASE_URL"))
         self.db = PostgresStorage(self.database_url) if self.database_url else None
+        # In-memory cache cho reference data ít thay đổi (knowledge_base, data_dictionary,
+        # question_examples). Tránh load lại từ DB remote 3-4 lần mỗi request. Trả về deep-copy
+        # nên caller có thể mutate an toàn; invalidate trong _save_json sau mỗi lần ghi.
+        self._ref_cache_lock = threading.RLock()
+        self._ref_cache: dict[str, dict[str, Any]] = {}
+        self.reference_cache_enabled = parse_bool_flag(os.getenv("REFERENCE_CACHE_ENABLED"), default=True)
         self.parser = parser or KnowledgeParser()
         self.llm_client = llm_client or AgentLLMClient()
         self.chat_context_backend = normalize_lookup(chat_context_backend if chat_context_backend is not None else os.getenv("CHAT_CONTEXT_BACKEND") or "auto")
@@ -112,6 +118,15 @@ class KnowledgeStore:
             else os.getenv("CHAT_MEMORY_HYDRATE_WHEN_EMPTY"),
             default=True,
         )
+        # Bỏ qua lần gọi LLM thứ 2 (answer synthesis) khi planner đã trả answer dùng được,
+        # cho luồng trả lời phổ biến. Tiết kiệm ~6.5s/lượt. Tắt cờ này để khôi phục synthesis.
+        self.skip_synthesis_on_planner_answer = parse_bool_flag(
+            os.getenv("CHAT_SKIP_SYNTHESIS_ON_PLANNER_ANSWER"), default=True
+        )
+        # Model riêng cho bước planner/skill-select (tác vụ ra quyết định có cấu trúc, JSON).
+        # Cho phép dùng model nhanh hơn (vd Qwen/gemma) cho planner mà giữ model mạnh cho câu
+        # trả lời. Rỗng -> dùng LLM_MODEL mặc định.
+        self.planner_model = normalize_text(os.getenv("LLM_PLANNER_MODEL"))
 
     def bootstrap(self) -> None:
         if self.db:
@@ -696,30 +711,22 @@ class KnowledgeStore:
             pending_action_id=pending_action_id,
         )
         if confirmation_result:
-            self._record_chat_total_latency(chat_session)
-            self._save_chat_session(chat_session)
-            return confirmation_result
+            return self._finish_chat_turn(chat_session, confirmation_result)
 
         pending_status_result = self._handle_pending_status_query(chat_session=chat_session, message=cleaned)
         if pending_status_result:
-            self._record_chat_total_latency(chat_session)
-            self._save_chat_session(chat_session)
-            return pending_status_result
+            return self._finish_chat_turn(chat_session, pending_status_result)
 
         refinement_result = self._handle_pending_action_refinement(
             chat_session=chat_session,
             message=cleaned,
         )
         if refinement_result:
-            self._record_chat_total_latency(chat_session)
-            self._save_chat_session(chat_session)
-            return refinement_result
+            return self._finish_chat_turn(chat_session, refinement_result)
 
         active_runtime_cancel_result = self._handle_active_runtime_skill_cancel(chat_session=chat_session, message=cleaned)
         if active_runtime_cancel_result:
-            self._record_chat_total_latency(chat_session)
-            self._save_chat_session(chat_session)
-            return active_runtime_cancel_result
+            return self._finish_chat_turn(chat_session, active_runtime_cancel_result)
 
         memory_started = time.perf_counter()
         conversation_context = self._build_conversation_context(
@@ -737,9 +744,7 @@ class KnowledgeStore:
         latency["retrieval"] = self._elapsed_ms(retrieval_started)
         if not self._llm_configured():
             result = self._llm_required_chat_response(chat_session=chat_session, message=cleaned)
-            self._record_chat_total_latency(chat_session)
-            self._save_chat_session(chat_session)
-            return result
+            return self._finish_chat_turn(chat_session, result)
 
         plan = self._plan_chat_action(
             chat_session=chat_session,
@@ -756,9 +761,7 @@ class KnowledgeStore:
             plan=plan,
         )
         latency["execute"] = self._elapsed_ms(execute_started)
-        self._record_chat_total_latency(chat_session)
-        self._save_chat_session(chat_session)
-        return result
+        return self._finish_chat_turn(chat_session, result)
 
     def ask_data_question(self, question: str) -> dict[str, Any]:
         cleaned = normalize_text(question)
@@ -1240,6 +1243,15 @@ class KnowledgeStore:
             return bool(re.search(pattern, text.upper()))
         return normalize_lookup(cleaned_term) in normalize_lookup(text)
 
+    def _contains_term_in_cached_text(self, *, normalized_text: str, upper_text: str, term: str) -> bool:
+        cleaned_term = normalize_text(term)
+        if not cleaned_term:
+            return False
+        if ACRONYM_PATTERN.fullmatch(cleaned_term):
+            pattern = rf"(?<![A-Z0-9]){re.escape(cleaned_term)}(?![A-Z0-9])"
+            return bool(re.search(pattern, upper_text))
+        return normalize_lookup(cleaned_term) in normalized_text
+
     def _normalize_data_dictionary(self, record: dict[str, Any]) -> dict[str, Any]:
         table = normalize_text(record.get("table"))
         if not table:
@@ -1380,6 +1392,7 @@ class KnowledgeStore:
             system=system,
             user=json.dumps(compact_input, ensure_ascii=False),
             temperature=0,
+            model=self.planner_model or None,
         )
         self._record_chat_latency(chat_session, "planner", planner_started)
         if not isinstance(parsed, dict):
@@ -1480,7 +1493,9 @@ class KnowledgeStore:
                 active_teaching = {"session_id": teaching_session_id, "status": "missing"}
         return {
             "raw_message": raw_message,
-            "conversation_history": conversation_context.get("conversation_history", []),
+            # Planner chỉ cần đủ ngữ cảnh gần để CHỌN action; lịch sử đầy đủ vẫn dùng ở bước
+            # execute (recall). Cắt còn 8 lượt gần nhất để giảm kích thước prompt -> giảm latency.
+            "conversation_history": conversation_context.get("conversation_history", [])[-8:],
             "memory": {
                 "backend": conversation_context.get("backend"),
                 "hydrated": conversation_context.get("memory_hydrated", False),
@@ -1571,7 +1586,7 @@ class KnowledgeStore:
             score = int(card.get("score") or 0)
         except (TypeError, ValueError):
             score = 0
-        if name == "air-sql-analyst" and score >= 20:
+        if name and score >= 10:
             return [name], "auto-selected high-score runtime skill candidate"
         return [], ""
 
@@ -1617,6 +1632,7 @@ class KnowledgeStore:
                 ensure_ascii=False,
             ),
             temperature=0,
+            model=self.planner_model or None,
         )
         valid_names = {card.get("name", "") for card in skill_cards}
         selected = parsed.get("selected_skills") if isinstance(parsed, dict) else []
@@ -2023,9 +2039,8 @@ class KnowledgeStore:
         return unique_values(terms)
 
     def _get_or_create_chat_session(self, *, session_id: str, user_id: str) -> dict[str, Any]:
-        data = self._load_chat_sessions()
         cleaned_id = normalize_text(session_id) or new_id("chat")
-        session = copy.deepcopy(data["sessions"].get(cleaned_id))
+        session = copy.deepcopy(self._load_chat_session(cleaned_id))
         if session:
             if user_id and not session.get("user_id"):
                 session["user_id"] = normalize_text(user_id)
@@ -2046,7 +2061,6 @@ class KnowledgeStore:
     def _save_chat_session(self, session: dict[str, Any]) -> None:
         session["state"] = self._chat_session_state(session)
         session["updated_at"] = now_iso()
-        data = self._load_chat_sessions()
         persisted = copy.deepcopy(session)
         for key in [
             "_conversation_context",
@@ -2059,11 +2073,30 @@ class KnowledgeStore:
             "_memory_hydrate_needed",
         ]:
             persisted.pop(key, None)
-        data["sessions"][session["id"]] = persisted
         if self.db:
-            self.db.save_chat_sessions(data)
+            save_one = getattr(self.db, "save_chat_session", None)
+            if callable(save_one):
+                save_one(persisted)
+            else:
+                data = self._load_chat_sessions()
+                data["sessions"][session["id"]] = persisted
+                self.db.save_chat_sessions(data)
         else:
+            data = self._load_chat_sessions()
+            data["sessions"][session["id"]] = persisted
             self._save_json(self.chat_sessions_path, data)
+
+    def _finish_chat_turn(self, chat_session: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        self._record_chat_total_latency(chat_session)
+        save_started = time.perf_counter()
+        self._save_chat_session(chat_session)
+        self._record_chat_latency(chat_session, "save", save_started)
+        started_at = chat_session.get("_chat_started_at")
+        if isinstance(started_at, (int, float)):
+            self._record_chat_latency(chat_session, "total_with_save", float(started_at))
+        self._sync_response_latency_debug(result, chat_session)
+        self._log_chat_latency(chat_session=chat_session, result=result)
+        return result
 
     def _append_chat_message(self, session: dict[str, Any], *, role: str, content: str) -> None:
         session.setdefault("messages", [])
@@ -2299,7 +2332,7 @@ class KnowledgeStore:
                         "used_knowledge_ids": [],
                         "used_dictionary_ids": [],
                         "used_example_ids": [],
-                        "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+                        "debug": {"llm_used": False, "fallback_used": False, "skip_answer_synthesis": True},
                     },
                     chat_session=chat_session,
                     requires_confirmation=False,
@@ -2320,7 +2353,7 @@ class KnowledgeStore:
                     "used_knowledge_ids": [],
                     "used_dictionary_ids": [],
                     "used_example_ids": [],
-                    "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+                    "debug": {"llm_used": False, "fallback_used": False, "skip_answer_synthesis": True},
                 },
                 chat_session=chat_session,
                 requires_confirmation=False,
@@ -2629,7 +2662,12 @@ class KnowledgeStore:
                 "knowledge": result.get("known_knowledge", result.get("knowledge", [])),
                 "dictionary": result.get("dictionary", []),
                 "examples": result.get("examples", []),
-                "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
+                "debug": {
+                    "llm_used": self._llm_configured(),
+                    "fallback_used": not self._llm_configured(),
+                    "skip_answer_synthesis": result.get("status") in {"needs_dictionary", "needs_knowledge"},
+                    "answer_synthesis_skip_reason": "deterministic_data_gap",
+                },
             }
             return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
 
@@ -2967,11 +3005,20 @@ class KnowledgeStore:
         chat_session: dict[str, Any],
         pending_action: dict[str, Any] | None = None,
     ) -> None:
+        synthesis_started = time.perf_counter()
         debug = response.setdefault("debug", {})
+        skip_reason = self._answer_synthesis_skip_reason(response=response, pending_action=pending_action)
+        if skip_reason:
+            debug["answer_synthesis_used"] = False
+            debug["answer_synthesis_fallback_reason"] = skip_reason
+            response["answer"] = self._sanitize_user_answer(normalize_text(response.get("answer")))
+            self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
+            return
         if not self._llm_configured():
             debug["answer_synthesis_used"] = False
             debug["answer_synthesis_fallback_reason"] = "llm_not_configured"
             response["answer"] = self._sanitize_user_answer(normalize_text(response.get("answer")))
+            self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
             return
 
         fallback_answer = self._sanitize_user_answer(normalize_text(response.get("answer")))
@@ -2998,6 +3045,7 @@ class KnowledgeStore:
             debug["answer_synthesis_used"] = False
             debug["answer_synthesis_fallback_reason"] = "llm_error"
             response["answer"] = fallback_answer
+            self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
             return
 
         cleaned = self._sanitize_user_answer(synthesized)
@@ -3005,15 +3053,47 @@ class KnowledgeStore:
             debug["answer_synthesis_used"] = False
             debug["answer_synthesis_fallback_reason"] = "empty_answer"
             response["answer"] = fallback_answer
+            self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
             return
         if self._answer_violates_locked_state(response, cleaned):
             debug["answer_synthesis_used"] = False
             debug["answer_synthesis_fallback_reason"] = "invalid_locked_state"
             response["answer"] = fallback_answer
+            self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
             return
         response["answer"] = cleaned
         debug["answer_synthesis_used"] = True
         debug["answer_synthesis_fallback_reason"] = ""
+        self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
+
+    def _answer_synthesis_skip_reason(
+        self,
+        *,
+        response: dict[str, Any],
+        pending_action: dict[str, Any] | None,
+    ) -> str:
+        debug = response.get("debug", {}) if isinstance(response.get("debug"), dict) else {}
+        if debug.get("skip_answer_synthesis"):
+            return normalize_text(debug.get("answer_synthesis_skip_reason")) or "fast_path"
+
+        status = normalize_lookup(response.get("status"))
+        intent = normalize_lookup(response.get("intent"))
+        answer = normalize_text(response.get("answer"))
+        if status == "cancelled":
+            return "fast_path"
+        if intent in {"pending_status", "runtime_skill"}:
+            return "fast_path"
+        if pending_action:
+            return ""
+        if status == "answered" and intent in {"planner_answer", "conversation_recall"}:
+            if not response.get("missing") and not response.get("sql"):
+                # Khi bật cờ, dùng thẳng văn của planner bất kể độ dài (bỏ giới hạn 240 ký tự)
+                # để tiết kiệm 1 lần gọi LLM. Tắt cờ thì chỉ skip cho câu trả lời ngắn an toàn.
+                if self.skip_synthesis_on_planner_answer:
+                    return "planner_answer_trusted"
+                if len(answer) <= 240:
+                    return "short_safe_answer"
+        return ""
 
     def _enforce_knowledge_write_invariant(self, response: dict[str, Any]) -> None:
         if not self._answer_claims_knowledge_write(response.get("answer", "")):
@@ -3146,6 +3226,30 @@ class KnowledgeStore:
         started_at = chat_session.get("_chat_started_at")
         if isinstance(started_at, (int, float)):
             self._record_chat_latency(chat_session, "total", float(started_at))
+
+    def _sync_response_latency_debug(self, result: dict[str, Any], chat_session: dict[str, Any]) -> None:
+        debug = result.setdefault("debug", {})
+        if isinstance(debug, dict):
+            debug["latency_ms"] = dict(chat_session.get("_latency_ms", {}))
+
+    def _log_chat_latency(self, *, chat_session: dict[str, Any], result: dict[str, Any]) -> None:
+        debug = result.get("debug", {}) if isinstance(result.get("debug"), dict) else {}
+        log_record = {
+            "event": "chat_latency",
+            "chat_session_id": chat_session.get("id", ""),
+            "status": result.get("status", ""),
+            "intent": result.get("intent", ""),
+            "session_state": result.get("session_state", ""),
+            "latency_ms": chat_session.get("_latency_ms", {}),
+            "context_backend": result.get("context_backend", ""),
+            "memory_timeout": bool(debug.get("memory_timeout")),
+            "answer_synthesis_used": bool(debug.get("answer_synthesis_used")),
+            "runtime_skills_used": debug.get("runtime_skills_used", []),
+        }
+        try:
+            print(f"[chat-latency] {json.dumps(log_record, ensure_ascii=False, sort_keys=True)}", flush=True)
+        except (TypeError, ValueError):
+            print(f"[chat-latency] status={result.get('status', '')} latency_ms={chat_session.get('_latency_ms', {})}", flush=True)
 
     def _attach_debug_context(self, response: dict[str, Any], *, context: dict[str, Any], chat_session: dict[str, Any]) -> None:
         if not chat_session.get("_debug_context"):
@@ -3937,9 +4041,11 @@ class KnowledgeStore:
                     " ".join(item.get("conditions", [])),
                 ]
             )
+        normalized_queries = [normalize_lookup(query) for query in queries if normalize_lookup(query)]
         query_terms = []
         for query in queries:
             query_terms.extend(self._extract_question_terms(query))
+        query_terms = unique_values(query_terms)
 
         for record in self._load_data_dictionary()["records"].values():
             if record.get("status") != "approved":
@@ -3947,11 +4053,19 @@ class KnowledgeStore:
             score = 0
             haystack = self._dictionary_haystack(record)
             normalized_haystack = normalize_lookup(haystack)
-            for query in queries:
-                normalized_query = normalize_lookup(query)
-                if normalized_query and normalized_query in normalized_haystack:
+            upper_haystack = haystack.upper()
+            for normalized_query in normalized_queries:
+                if normalized_query in normalized_haystack:
                     score += 12
-            score += 3 * sum(1 for term in query_terms if self._dictionary_matches_term(record, term))
+            score += 3 * sum(
+                1
+                for term in query_terms
+                if self._contains_term_in_cached_text(
+                    normalized_text=normalized_haystack,
+                    upper_text=upper_haystack,
+                    term=term,
+                )
+            )
             if score <= 0:
                 continue
             item = copy.deepcopy(record)
@@ -4339,9 +4453,10 @@ class KnowledgeStore:
         return self._load_json(self.candidates_path, empty_candidates)
 
     def _load_knowledge_base(self) -> dict[str, Any]:
-        if self.db:
-            return self.db.load_knowledge_base()
-        return self._load_json(self.knowledge_base_path, empty_knowledge_base)
+        return self._load_reference_cached(
+            "knowledge_base",
+            lambda: self.db.load_knowledge_base() if self.db else self._load_json(self.knowledge_base_path, empty_knowledge_base),
+        )
 
     def _load_teaching_sessions(self) -> dict[str, Any]:
         if self.db:
@@ -4353,15 +4468,56 @@ class KnowledgeStore:
             return self.db.load_chat_sessions()
         return self._load_json(self.chat_sessions_path, empty_chat_sessions)
 
-    def _load_data_dictionary(self) -> dict[str, Any]:
+    def _load_chat_session(self, session_id: str) -> dict[str, Any] | None:
+        """Load đúng 1 session theo id (point lookup) thay vì quét cả bảng chat_sessions."""
         if self.db:
-            return self.db.load_data_dictionary()
-        return self._load_json(self.data_dictionary_path, empty_data_dictionary)
+            load_one = getattr(self.db, "load_chat_session", None)
+            if callable(load_one):
+                return load_one(session_id)
+            return self.db.load_chat_sessions().get("sessions", {}).get(session_id)
+        return self._load_chat_sessions().get("sessions", {}).get(session_id)
+
+    def _load_data_dictionary(self) -> dict[str, Any]:
+        return self._load_reference_cached(
+            "data_dictionary",
+            lambda: self.db.load_data_dictionary() if self.db else self._load_json(self.data_dictionary_path, empty_data_dictionary),
+        )
 
     def _load_question_examples(self) -> dict[str, Any]:
-        if self.db:
-            return self.db.load_question_examples()
-        return self._load_json(self.question_examples_path, empty_question_examples)
+        return self._load_reference_cached(
+            "question_examples",
+            lambda: self.db.load_question_examples() if self.db else self._load_json(self.question_examples_path, empty_question_examples),
+        )
+
+    def _ref_cache_key_for_path(self, path: Path) -> str | None:
+        if path == self.knowledge_base_path:
+            return "knowledge_base"
+        if path == self.data_dictionary_path:
+            return "data_dictionary"
+        if path == self.question_examples_path:
+            return "question_examples"
+        return None
+
+    def _load_reference_cached(self, key: str, loader) -> dict[str, Any]:
+        """Read-through cache cho reference data. Trả về deep-copy để caller mutate an toàn."""
+        if not self.reference_cache_enabled:
+            return loader()
+        with self._ref_cache_lock:
+            cached = self._ref_cache.get(key)
+        if cached is None:
+            # Load ngoài lock để không giữ lock trong lúc gọi DB remote. Nếu 2 thread cùng
+            # miss thì chỉ tốn thêm 1 query (vô hại) — lock chủ yếu để invalidate không bị mất.
+            loaded = loader()
+            with self._ref_cache_lock:
+                self._ref_cache[key] = loaded
+                cached = loaded
+        return copy.deepcopy(cached)
+
+    def _invalidate_ref_cache(self, key: str | None) -> None:
+        if not key:
+            return
+        with self._ref_cache_lock:
+            self._ref_cache.pop(key, None)
 
     def _load_json(self, path: Path, default_factory) -> dict[str, Any]:
         self.bootstrap_minimal(path, default_factory)
@@ -4376,6 +4532,7 @@ class KnowledgeStore:
                 return
             if path == self.knowledge_base_path:
                 self.db.save_knowledge_base(data)
+                self._invalidate_ref_cache("knowledge_base")
                 return
             if path == self.teaching_sessions_path:
                 self.db.save_teaching_sessions(data)
@@ -4385,14 +4542,18 @@ class KnowledgeStore:
                 return
             if path == self.data_dictionary_path:
                 self.db.save_data_dictionary(data)
+                self._invalidate_ref_cache("data_dictionary")
                 return
             if path == self.question_examples_path:
                 self.db.save_question_examples(data)
+                self._invalidate_ref_cache("question_examples")
                 return
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as file:
             json.dump(data, file, indent=2, ensure_ascii=False, sort_keys=True)
             file.write("\n")
+        # Local JSON mode: invalidate cache sau khi ghi file cho 3 dataset được cache.
+        self._invalidate_ref_cache(self._ref_cache_key_for_path(path))
 
     def _append_jsonl(self, path: Path, record: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -46,7 +46,7 @@ class FakeChatLLM:
     def configured(self):
         return True
 
-    def complete_json(self, *, system, user, temperature=0):
+    def complete_json(self, *, system, user, temperature=0, model=None):
         if "draft SQL" in system or "draft SQL" in system.lower():
             return {}
         if "select runtime skills" in system:
@@ -62,7 +62,7 @@ class FakeChatLLM:
             return self.plans[0]
         return {}
 
-    def complete_text(self, *, system, user, temperature=0.2):
+    def complete_text(self, *, system, user, temperature=0.2, model=None):
         if "final user-facing answer" in system:
             import json
 
@@ -74,13 +74,13 @@ class FakeChatLLM:
 
 
 class FailingTextLLM(FakeChatLLM):
-    def complete_text(self, *, system, user, temperature=0.2):
+    def complete_text(self, *, system, user, temperature=0.2, model=None):
         self.text_inputs.append({"system": system, "user": user, "temperature": temperature})
         raise ValueError("text synthesis failed")
 
 
 class ViolatingSynthesisLLM(FakeChatLLM):
-    def complete_text(self, *, system, user, temperature=0.2):
+    def complete_text(self, *, system, user, temperature=0.2, model=None):
         self.text_inputs.append({"system": system, "user": user, "temperature": temperature})
         if "final user-facing answer" in system:
             return "```sql\nSELECT COUNT(*) FROM payment_air\n```"
@@ -93,7 +93,7 @@ class CapturingPlannerLLM(FakeChatLLM):
         self.planner_inputs = []
         self.skill_selector_inputs = []
 
-    def complete_json(self, *, system, user, temperature=0):
+    def complete_json(self, *, system, user, temperature=0, model=None):
         if "select runtime skills" in system:
             import json
 
@@ -106,7 +106,7 @@ class CapturingPlannerLLM(FakeChatLLM):
 
 
 class ThinkWithMeLLM(CapturingPlannerLLM):
-    def complete_json(self, *, system, user, temperature=0):
+    def complete_json(self, *, system, user, temperature=0, model=None):
         if "select runtime skills" in system:
             import json
 
@@ -636,6 +636,9 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertNotIn("examples", result)
         self.assertIn("latency_ms", result["debug"])
         self.assertIn("total", result["debug"]["latency_ms"])
+        self.assertIn("answer_synthesis", result["debug"]["latency_ms"])
+        self.assertIn("save", result["debug"]["latency_ms"])
+        self.assertIn("total_with_save", result["debug"]["latency_ms"])
 
     def test_chat_response_includes_full_context_when_debug_context_enabled(self):
         store = self.make_store(
@@ -705,7 +708,7 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(first["debug"]["runtime_skills_used"], ["think-with-me"])
         self.assertEqual(second["debug"]["runtime_skills_used"], ["think-with-me"])
         self.assertEqual(second["debug"]["runtime_skill_selection_reason"], "using active runtime skill from session: think-with-me")
-        self.assertEqual(len(llm.skill_selector_inputs), 1)
+        self.assertEqual(llm.skill_selector_inputs, [])
 
     def test_chat_cancel_clears_active_runtime_skill(self):
         llm = ThinkWithMeLLM(plan={"action": "answer_direct", "answer": "Is this what you mean?", "confidence": 0.9})
@@ -1235,6 +1238,32 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertIn("Top route thực mua tháng 2 theo provider", status["answer"])
         self.assertEqual(status["pending_action_id"], proposed["pending_action_id"])
         self.assertFalse(status["debug"]["llm_used"])
+
+    def test_chat_confirm_fast_path_does_not_call_planner_again(self):
+        llm = CapturingPlannerLLM(
+            plan={
+                "action": "propose_data_query",
+                "answer": "",
+                "payload": {"resolved_message": "Top route thực mua tháng 2 theo provider"},
+                "confidence": 0.9,
+            }
+        )
+        store = self.make_store(llm_client=llm)
+
+        proposed = store.chat(message="Top route thực mua tháng 2 theo provider", session_id="confirm-fast-path")
+        planner_calls_after_proposal = len(llm.planner_inputs)
+        synthesis_calls_after_proposal = len(llm.text_inputs)
+        confirmed = store.chat(
+            message="confirm",
+            session_id="confirm-fast-path",
+            pending_action_id=proposed["pending_action_id"],
+        )
+
+        self.assertEqual(planner_calls_after_proposal, 1)
+        self.assertEqual(len(llm.planner_inputs), planner_calls_after_proposal)
+        self.assertEqual(len(llm.text_inputs), synthesis_calls_after_proposal)
+        self.assertEqual(confirmed["intent"], "data_sql")
+        self.assertIn(confirmed["status"], {"needs_knowledge", "needs_dictionary", "needs_example", "sql_draft"})
 
     def test_chat_cancel_clears_active_pending_action(self):
         store = self.make_store(
