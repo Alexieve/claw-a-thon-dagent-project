@@ -13,19 +13,6 @@ class RequestContextLike(Protocol):
     session_id: str | None
 
 
-class StoreLike(Protocol):
-    def chat(
-        self,
-        *,
-        message: str,
-        user_id: str = "",
-        session_id: str = "",
-        pending_action_id: str = "",
-        debug_context: bool = False,
-        use_runtime_skills: Any = None,
-    ) -> dict[str, Any]: ...
-
-
 @dataclass(frozen=True)
 class ActionSpec:
     name: str

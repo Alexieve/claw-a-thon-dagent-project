@@ -68,6 +68,9 @@ create table if not exists chat_sessions (
 create index if not exists chat_sessions_state_idx
   on chat_sessions (state);
 
+create index if not exists chat_sessions_user_id_idx
+  on chat_sessions (user_id);
+
 create index if not exists chat_sessions_payload_gin_idx
   on chat_sessions using gin (payload);
 

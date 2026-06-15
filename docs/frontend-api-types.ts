@@ -1,4 +1,10 @@
-export type AgentAction = "chat" | "search_knowledge" | "storage_status" | string;
+export type AgentAction =
+  | "chat"
+  | "search_knowledge"
+  | "storage_status"
+  | "list_chat_sessions"
+  | "get_chat_history"
+  | string;
 
 export interface AgentApiError {
   code: string;
@@ -223,7 +229,64 @@ export interface StorageStatusResult {
   chat_context_fallback_on_memory_error: boolean;
 }
 
-export type AgentRequest = ChatRequest | SearchKnowledgeRequest | StorageStatusRequest;
+export interface ListChatSessionsRequest {
+  action: "list_chat_sessions";
+  /** Stable user id. If omitted, backend returns all sessions. */
+  user_id?: string;
+  request_id?: string;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  user_id: string;
+  state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
+  /** Number of messages in this chat session. */
+  message_count: number;
+  /** Preview of the latest message, currently capped by backend. */
+  last_message: string;
+  active_teaching_session_id: string;
+  /** ISO timestamp. */
+  created_at: string;
+  /** ISO timestamp. */
+  updated_at: string;
+}
+
+export interface ListChatSessionsResult {
+  sessions: ChatSessionSummary[];
+}
+
+export interface GetChatHistoryRequest {
+  action: "get_chat_history";
+  /** Chat session id to load. */
+  session_id: string;
+  request_id?: string;
+}
+
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatHistoryResult {
+  session_id: string;
+  user_id: string;
+  state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
+  message_count: number;
+  /** Messages sorted chronologically, oldest first. */
+  messages: ChatMessage[];
+  active_teaching_session_id: string;
+  /** ISO timestamp. */
+  created_at: string;
+  /** ISO timestamp. */
+  updated_at: string;
+}
+
+export type AgentRequest =
+  | ChatRequest
+  | SearchKnowledgeRequest
+  | StorageStatusRequest
+  | ListChatSessionsRequest
+  | GetChatHistoryRequest;
 
 export async function invokeAgent<T>(
   baseUrl: string,

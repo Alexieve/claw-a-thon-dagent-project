@@ -93,10 +93,17 @@ class PostgresStorage:
                     self._upsert_teaching_session(cur, session)
             conn.commit()
 
-    def load_chat_sessions(self) -> dict[str, Any]:
+    def load_chat_sessions(self, *, user_id: str = "") -> dict[str, Any]:
+        # Filter user_id ngay tại SQL (dùng index chat_sessions_user_id_idx) thay vì quét cả
+        # bảng rồi lọc bằng Python. user_id rỗng -> trả toàn bộ session như cũ.
+        query = "select payload from chat_sessions"
+        params: tuple[Any, ...] = ()
+        if user_id:
+            query += " where user_id = %s"
+            params = (user_id,)
         with self._connect() as conn:
             with conn.cursor(row_factory=dict_row) as cur:
-                cur.execute("select payload from chat_sessions")
+                cur.execute(query, params)
                 rows = cur.fetchall()
         return {"schema_version": 1, "sessions": {row["payload"]["id"]: row["payload"] for row in rows}}
 
@@ -120,6 +127,39 @@ class PostgresStorage:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 self._upsert_chat_session(cur, session)
+            conn.commit()
+
+    # Point-upsert 1 record (không delete+reinsert cả bảng). Dùng cho luồng ghi đơn lẻ trong
+    # app. Các save_* full-table phía trên vẫn được giữ cho scripts/reset_test_data.py (vốn dựa
+    # vào delete-all để xoá record test khỏi DB).
+    def save_knowledge_record(self, record: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._upsert_knowledge(cur, record)
+            conn.commit()
+
+    def save_candidate(self, candidate: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._upsert_candidate(cur, candidate)
+            conn.commit()
+
+    def save_teaching_session(self, session: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._upsert_teaching_session(cur, session)
+            conn.commit()
+
+    def save_data_dictionary_record(self, record: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._upsert_data_dictionary(cur, record)
+            conn.commit()
+
+    def save_question_example(self, example: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                self._upsert_question_example(cur, example)
             conn.commit()
 
     def load_data_dictionary(self) -> dict[str, Any]:

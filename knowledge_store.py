@@ -190,37 +190,44 @@ class KnowledgeStore:
         }
 
     def list_chat_sessions_by_user(self, user_id: str = "") -> list[dict[str, Any]]:
-        data = self._load_chat_sessions()
         normalized_uid = normalize_text(user_id)
-        sessions = []
-        for session in data.get("sessions", {}).values():
-            if normalized_uid and normalize_text(session.get("user_id")) != normalized_uid:
-                continue
-            messages = session.get("messages", []) if isinstance(session.get("messages"), list) else []
-            last_message = ""
-            for msg in reversed(messages):
-                if isinstance(msg, dict) and normalize_text(msg.get("content")):
-                    last_message = normalize_text(msg["content"])
-                    break
-            sessions.append({
-                "id": session.get("id", ""),
-                "user_id": session.get("user_id", ""),
-                "state": session.get("state", "idle"),
-                "message_count": len(messages),
-                "last_message": last_message[:200],
-                "active_teaching_session_id": session.get("active_teaching_session_id", ""),
-                "created_at": session.get("created_at", ""),
-                "updated_at": session.get("updated_at", ""),
-            })
+        if self.db:
+            # Đẩy filter xuống SQL (index chat_sessions_user_id_idx) thay vì load cả bảng.
+            candidates = self.db.load_chat_sessions(user_id=normalized_uid).get("sessions", {}).values()
+        else:
+            candidates = [
+                session
+                for session in self._load_chat_sessions().get("sessions", {}).values()
+                if not normalized_uid or normalize_text(session.get("user_id")) == normalized_uid
+            ]
+        sessions = [self._summarize_chat_session(session) for session in candidates]
         sessions.sort(key=lambda s: s.get("updated_at") or "", reverse=True)
         return sessions
+
+    def _summarize_chat_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        messages = session.get("messages", []) if isinstance(session.get("messages"), list) else []
+        last_message = ""
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and normalize_text(msg.get("content")):
+                last_message = normalize_text(msg["content"])
+                break
+        return {
+            "id": session.get("id", ""),
+            "user_id": session.get("user_id", ""),
+            "state": session.get("state", "idle"),
+            "message_count": len(messages),
+            "last_message": last_message[:200],
+            "active_teaching_session_id": session.get("active_teaching_session_id", ""),
+            "created_at": session.get("created_at", ""),
+            "updated_at": session.get("updated_at", ""),
+        }
 
     def get_chat_history(self, session_id: str = "") -> dict[str, Any]:
         cleaned_id = normalize_text(session_id)
         if not cleaned_id:
             raise ValueError("session_id la bat buoc")
-        data = self._load_chat_sessions()
-        session = data.get("sessions", {}).get(cleaned_id)
+        # Point lookup theo id (PK) thay vì load toàn bộ bảng chat_sessions rồi .get().
+        session = self._load_chat_session(cleaned_id)
         if not session:
             raise ValueError(f"Khong tim thay session: {cleaned_id}")
         messages = session.get("messages", []) if isinstance(session.get("messages"), list) else []
@@ -429,13 +436,6 @@ class KnowledgeStore:
             "change_requests": change_requests,
         }
 
-    def add_candidate(self, candidate: dict[str, Any]) -> dict[str, Any]:
-        data = self._load_candidates()
-        normalized = self._normalize_candidate(candidate)
-        data["candidates"][normalized["id"]] = normalized
-        self._save_json(self.candidates_path, data)
-        return copy.deepcopy(normalized)
-
     def list_candidates(self, status: str = "") -> list[dict[str, Any]]:
         data = self._load_candidates()
         normalized_status = normalize_lookup(status)
@@ -445,9 +445,6 @@ class KnowledgeStore:
                 continue
             candidates.append(copy.deepcopy(candidate))
         return sorted(candidates, key=lambda item: item.get("created_at", ""), reverse=True)
-
-    def get_candidate(self, candidate_id: str) -> dict[str, Any] | None:
-        return copy.deepcopy(self._load_candidates()["candidates"].get(candidate_id))
 
     def review_candidate(
         self,
@@ -476,8 +473,7 @@ class KnowledgeStore:
         normalized_decision = normalize_lookup(decision)
         if normalized_decision == "reject":
             candidate["status"] = "rejected"
-            data["candidates"][candidate_id] = candidate
-            self._save_json(self.candidates_path, data)
+            self._save_record(self.candidates_path, candidate)
             return {"candidate": copy.deepcopy(candidate), "knowledge": None}
 
         if normalized_decision != "approve":
@@ -487,8 +483,7 @@ class KnowledgeStore:
         candidate["status"] = "approved" if knowledge else "conflict"
         if knowledge:
             candidate["conflict_with"] = ""
-        data["candidates"][candidate_id] = candidate
-        self._save_json(self.candidates_path, data)
+        self._save_record(self.candidates_path, candidate)
         return {"candidate": copy.deepcopy(candidate), "knowledge": copy.deepcopy(knowledge)}
 
     def search_knowledge(self, query: str = "") -> list[dict[str, Any]]:
@@ -558,9 +553,7 @@ class KnowledgeStore:
                 "updated_at": now_iso(),
             }
         )
-        data = self._load_data_dictionary()
-        data["records"][record["id"]] = record
-        self._save_json(self.data_dictionary_path, data)
+        self._save_record(self.data_dictionary_path, record)
         return copy.deepcopy(record)
 
     def list_data_dictionary(self) -> list[dict[str, Any]]:
@@ -607,9 +600,7 @@ class KnowledgeStore:
                 "updated_at": now_iso(),
             }
         )
-        data = self._load_question_examples()
-        data["examples"][example["id"]] = example
-        self._save_json(self.question_examples_path, data)
+        self._save_record(self.question_examples_path, example)
         return copy.deepcopy(example)
 
     def list_question_examples(self) -> list[dict[str, Any]]:
@@ -986,9 +977,7 @@ class KnowledgeStore:
     def _save_teaching_session(self, session: dict[str, Any]) -> None:
         if session.get("status") not in ALLOWED_TEACHING_SESSION_STATUSES:
             session["status"] = "clarifying"
-        data = self._load_teaching_sessions()
-        data["sessions"][session["id"]] = copy.deepcopy(session)
-        self._save_json(self.teaching_sessions_path, data)
+        self._save_record(self.teaching_sessions_path, session)
 
     def _approve_candidate(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
         if candidate.get("status") == "pending_change" or candidate.get("target_knowledge_id"):
@@ -1027,7 +1016,6 @@ class KnowledgeStore:
         *,
         created_by: str = "",
     ) -> dict[str, Any]:
-        base = self._load_knowledge_base()
         owner = normalize_text(candidate.get("owner")) or normalize_text(created_by)
         record = {
             "id": new_id("kn"),
@@ -1051,8 +1039,7 @@ class KnowledgeStore:
             "created_at": now_iso(),
             "updated_at": now_iso(),
         }
-        base["knowledge"][record["id"]] = record
-        self._save_json(self.knowledge_base_path, base)
+        self._save_record(self.knowledge_base_path, record)
         return copy.deepcopy(record)
 
     def _create_change_candidate(
@@ -1079,9 +1066,7 @@ class KnowledgeStore:
             }
         )
         if save:
-            data = self._load_candidates()
-            data["candidates"][normalized["id"]] = normalized
-            self._save_json(self.candidates_path, data)
+            self._save_record(self.candidates_path, normalized)
         return copy.deepcopy(normalized)
 
     def _apply_change_candidate(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
@@ -1125,8 +1110,7 @@ class KnowledgeStore:
                 "updated_at": now_iso(),
             }
         )
-        base["knowledge"][target_id] = record
-        self._save_json(self.knowledge_base_path, base)
+        self._save_record(self.knowledge_base_path, record)
         return copy.deepcopy(record)
 
     def _knowledge_snapshot(self, record: dict[str, Any]) -> dict[str, Any]:
@@ -1226,13 +1210,6 @@ class KnowledgeStore:
             if normalized_name in {normalize_lookup(item) for item in names}:
                 return copy.deepcopy(record)
         return None
-
-    def _definitions_compatible(self, canonical: str, incoming: str) -> bool:
-        canonical_norm = normalize_lookup(canonical)
-        incoming_norm = normalize_lookup(incoming)
-        if not canonical_norm or not incoming_norm:
-            return True
-        return canonical_norm == incoming_norm
 
     def _contains_term(self, text: str, term: str) -> bool:
         cleaned_term = normalize_text(term)
@@ -2809,14 +2786,6 @@ class KnowledgeStore:
             return f'"{name}" thuộc domain hoặc team nào vậy? Cho mình biết để lưu cho đúng nhé.'
         return f'Bạn bổ sung thêm thông tin gì cho "{name}" không? Nếu đủ rồi mình lưu luôn.'
 
-    def _create_commit_teaching_action(self, chat_session: dict[str, Any], *, teaching_session_id: str) -> dict[str, Any]:
-        self._cancel_pending_chat_actions(chat_session, action_type="commit_teaching", reason="replaced_by_new_draft")
-        return self._create_pending_chat_action(
-            chat_session,
-            action_type="commit_teaching",
-            payload={"teaching_session_id": teaching_session_id},
-        )
-
     def _propose_data_query_action(
         self,
         *,
@@ -3315,203 +3284,6 @@ class KnowledgeStore:
             return "teaching_draft_active"
         return "idle"
 
-    def _chat_propose_teaching_session(self, *, message: str, user_id: str, llm_used: bool) -> dict[str, Any]:
-        session = {
-            "id": new_id("teach"),
-            "status": "awaiting_teach_confirmation",
-            "messages": [{"role": "user", "content": message, "created_at": now_iso()}],
-            "draft": {},
-            "stakeholder": normalize_text(user_id),
-            "team": "",
-            "domain": "",
-            "owner": normalize_text(user_id),
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-        }
-        self._save_teaching_session(session)
-        return {
-            "status": "needs_confirmation",
-            "intent": "teach_knowledge",
-            "answer": (
-                "Mình hiểu là bạn muốn lưu định nghĩa này vào từ điển metric của team. "
-                "Bạn nhắn 'ok' để mình lưu nhé (hoặc 'không' nếu bạn chưa muốn lưu)."
-            ),
-            "question": message,
-            "session_id": session["id"],
-            "teaching_session": copy.deepcopy(session),
-            "draft": {},
-            "summary": {},
-            "missing": [
-                {
-                    "type": "confirmation",
-                    "concept": "teach_knowledge",
-                    "question": "Bạn muốn mình lưu định nghĩa này vào từ điển metric của team không?",
-                }
-            ],
-            "used_knowledge_ids": [],
-            "used_dictionary_ids": [],
-            "used_example_ids": [],
-            "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-        }
-
-    def _chat_continue_teaching_session(
-        self,
-        *,
-        message: str,
-        user_id: str,
-        session_id: str,
-    ) -> dict[str, Any]:
-        cleaned_session_id = normalize_text(session_id)
-        if not cleaned_session_id:
-            return {}
-        try:
-            session = self._get_teaching_session(cleaned_session_id)
-        except ValueError:
-            return {}
-        if session.get("status") in {"committed", "pending_approval", "cancelled"}:
-            return {}
-
-        llm_used = self._llm_configured()
-        if session.get("status") == "awaiting_teach_confirmation":
-            if self._is_chat_cancel(message):
-                session["status"] = "cancelled"
-                session["updated_at"] = now_iso()
-                self._save_teaching_session(session)
-                return {
-                    "status": "cancelled",
-                    "intent": "teach_knowledge",
-                    "answer": "Mình đã bỏ qua, chưa lưu gì vào từ điển cả.",
-                    "question": message,
-                    "session_id": cleaned_session_id,
-                    "teaching_session": copy.deepcopy(session),
-                    "missing": [],
-                    "used_knowledge_ids": [],
-                    "used_dictionary_ids": [],
-                    "used_example_ids": [],
-                    "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-                }
-            if not self._is_chat_confirmation(message):
-                return {
-                    "status": "needs_confirmation",
-                    "intent": "teach_knowledge",
-                    "answer": "Mình vẫn đang chờ bạn đồng ý lưu định nghĩa vừa rồi. Nhắn 'ok' để mình lưu, hoặc 'không' nếu bạn chưa muốn.",
-                    "question": message,
-                    "session_id": cleaned_session_id,
-                    "teaching_session": copy.deepcopy(session),
-                    "missing": [
-                        {
-                            "type": "confirmation",
-                            "concept": "teach_knowledge",
-                            "question": "Bạn muốn mình lưu định nghĩa vừa rồi không?",
-                        }
-                    ],
-                    "used_knowledge_ids": [],
-                    "used_dictionary_ids": [],
-                    "used_example_ids": [],
-                    "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-                }
-            session["status"] = "clarifying"
-            session = self._refresh_teaching_session(session)
-            self._save_teaching_session(session)
-            # User da dong y luu -> neu noi dung da du thi luu thang, khong hoi lai.
-            if session.get("status") == "awaiting_confirmation":
-                return self._legacy_commit_teaching(cleaned_session_id, message, llm_used)
-            result = self._teaching_session_response(session)
-            return {
-                "status": result.get("status", "clarifying"),
-                "intent": "teach_knowledge",
-                "answer": self._build_teaching_chat_answer(result),
-                "question": message,
-                "session_id": cleaned_session_id,
-                "teaching_session": result.get("session"),
-                "draft": result.get("draft"),
-                "summary": result.get("summary"),
-                "missing": [],
-                "used_knowledge_ids": [],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-            }
-
-        if self._is_chat_cancel(message):
-            result = self.confirm_teach_session(session_id=cleaned_session_id, decision="cancel")
-            return {
-                "status": "cancelled",
-                "intent": "teach_knowledge",
-                "answer": "Mình đã bỏ qua, chưa lưu gì vào từ điển cả.",
-                "question": message,
-                "session_id": cleaned_session_id,
-                "teaching_session": result.get("session"),
-                "missing": [],
-                "used_knowledge_ids": [],
-                "used_dictionary_ids": [],
-                "used_example_ids": [],
-                "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-            }
-        if self._is_chat_confirmation(message):
-            return self._legacy_commit_teaching(cleaned_session_id, message, llm_used)
-        is_summary_request = self._is_chat_summary_request(message)
-        if is_summary_request:
-            result = self.summarize_teach_session(session_id=cleaned_session_id)
-        else:
-            result = self.append_teach_message(session_id=cleaned_session_id, message=message)
-            # Sau khi bo sung ma noi dung da du thi luu thang, khong bat xac nhan lai.
-            if result.get("status") == "awaiting_confirmation":
-                return self._legacy_commit_teaching(cleaned_session_id, message, llm_used)
-        return {
-            "status": result.get("status", "clarifying"),
-            "intent": "teach_knowledge",
-            "answer": self._build_teaching_chat_answer(result),
-            "question": message,
-            "session_id": cleaned_session_id,
-            "teaching_session": result.get("session"),
-            "draft": result.get("draft"),
-            "summary": result.get("summary"),
-            "missing": [],
-            "used_knowledge_ids": [],
-            "used_dictionary_ids": [],
-            "used_example_ids": [],
-            "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-        }
-
-    def _legacy_commit_teaching(self, session_id: str, message: str, llm_used: bool) -> dict[str, Any]:
-        """Ghi thang draft vao tu dien cho luong teaching session truc tiep (khong qua pending action)."""
-        result = self.confirm_teach_session(session_id=session_id, decision="confirm")
-        knowledge_created = result.get("knowledge_created", [])
-        change_requests = result.get("change_requests", [])
-        fallback_term = (result.get("session", {}).get("draft", {}) or {}).get("name", "")
-        return {
-            "status": result.get("session", {}).get("status", "committed"),
-            "intent": "teach_knowledge",
-            "answer": self._plain_teaching_commit_answer(knowledge_created, change_requests, fallback_term),
-            "question": message,
-            "session_id": session_id,
-            "teaching_session": result.get("session"),
-            "knowledge_created": knowledge_created,
-            "change_requests": change_requests,
-            "missing": [],
-            "used_knowledge_ids": [item["id"] for item in knowledge_created],
-            "used_dictionary_ids": [],
-            "used_example_ids": [],
-            "debug": {"llm_used": llm_used, "fallback_used": not llm_used},
-        }
-
-    def _build_teaching_chat_answer(self, result: dict[str, Any]) -> str:
-        if result.get("status") == "awaiting_confirmation":
-            summary = result.get("summary") or {}
-            term = summary.get("term") or result.get("draft", {}).get("name", "")
-            definition = summary.get("definition") or result.get("draft", {}).get("definition", "")
-            formula = summary.get("formula") or result.get("draft", {}).get("formula")
-            parts = [f'Mình hiểu định nghĩa "{term}": {definition}'] if term or definition else ["Mình đã ghi nhận nội dung này."]
-            if formula:
-                parts.append(f"Cách tính: {formula}.")
-            parts.append("Nhắn 'ok' để mình lưu vào từ điển, hoặc bổ sung thêm nếu còn thiếu.")
-            return " ".join(parts)
-        question = result.get("question")
-        if question:
-            return f"Mình cần thêm một chút thông tin trước khi lưu: {question}"
-        return "Mình đã ghi nhận thêm thông tin. Bạn nhắn 'tóm tắt' để xem lại, hoặc 'ok' để mình lưu vào từ điển."
-
     def _is_chat_confirmation(self, message: str) -> bool:
         lowered = normalize_lookup(message)
         if not lowered.strip():
@@ -3860,15 +3632,6 @@ class KnowledgeStore:
             rendered = "; ".join(item.get("question", "") for item in missing[:5])
             return f"Mình chưa đủ Domain Knowledge để hiểu chắc câu hỏi này. Cần làm rõ: {rendered}"
         return data_result.get("answer", "Mình cần thêm context để trả lời chắc chắn.")
-
-    def _build_dictionary_help_answer(self, message: str, context: dict[str, Any]) -> str:
-        if context.get("dictionary"):
-            tables = ", ".join(item.get("table", "") for item in context["dictionary"][:5])
-            return f"Mình tìm thấy các mapping liên quan: {tables}. Bạn có thể hỏi tiếp theo tên bảng/cột hoặc alias nghiệp vụ."
-        return (
-            "Hiện chưa có data dictionary phù hợp với câu hỏi này. "
-            "Bạn có thể thêm bằng action `add_data_dictionary` với table, description, columns, relationships và owner."
-        )
 
     def _build_llm_sql_draft(
         self,
@@ -4554,6 +4317,32 @@ class KnowledgeStore:
             file.write("\n")
         # Local JSON mode: invalidate cache sau khi ghi file cho 3 dataset được cache.
         self._invalidate_ref_cache(self._ref_cache_key_for_path(path))
+
+    def _save_record(self, path: Path, record: dict[str, Any]) -> None:
+        """Ghi đúng 1 record (point upsert) thay vì rewrite cả bảng.
+        DB mode: gọi save_* point-upsert tương ứng + invalidate ref cache.
+        JSON mode: giữ hành vi load->set->save_json.
+        Lưu ý: các save_* full-table (delete+reinsert) trong PostgresStorage vẫn được giữ cho
+        scripts/reset_test_data.py — script đó dựa vào delete-all để xoá record test khỏi DB."""
+        if path == self.candidates_path:
+            container_key, default_factory, db_saver = "candidates", empty_candidates, "save_candidate"
+        elif path == self.knowledge_base_path:
+            container_key, default_factory, db_saver = "knowledge", empty_knowledge_base, "save_knowledge_record"
+        elif path == self.teaching_sessions_path:
+            container_key, default_factory, db_saver = "sessions", empty_teaching_sessions, "save_teaching_session"
+        elif path == self.data_dictionary_path:
+            container_key, default_factory, db_saver = "records", empty_data_dictionary, "save_data_dictionary_record"
+        elif path == self.question_examples_path:
+            container_key, default_factory, db_saver = "examples", empty_question_examples, "save_question_example"
+        else:
+            raise ValueError(f"_save_record khong ho tro path: {path}")
+        if self.db:
+            getattr(self.db, db_saver)(record)
+            self._invalidate_ref_cache(self._ref_cache_key_for_path(path))
+            return
+        data = self._load_json(path, default_factory)
+        data[container_key][record["id"]] = copy.deepcopy(record)
+        self._save_json(path, data)
 
     def _append_jsonl(self, path: Path, record: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
