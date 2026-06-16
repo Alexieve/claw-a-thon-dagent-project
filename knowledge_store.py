@@ -1762,43 +1762,40 @@ class KnowledgeStore:
             parsed["clarifying_questions"] = []
         if not isinstance(parsed.get("used_context_terms"), list):
             parsed["used_context_terms"] = []
-        if self._message_requests_knowledge_write(raw_message) and parsed["action"] in {
-            "answer_direct",
-            "ask_clarification",
-            "recall_conversation",
-            "noop",
-        }:
-            # Giu lai cau tra loi cua planner neu no KHONG khang dinh sai la "da luu"
-            # (de bao toan phan trinh bay lai dinh nghia), neu khong thi dung cau de xuat chung.
+        _safe_planner_actions = {"answer_direct", "ask_clarification", "recall_conversation", "noop"}
+        active_teaching_id = normalize_text(chat_session.get("active_teaching_session_id", ""))
+        if active_teaching_id and parsed["action"] in _safe_planner_actions:
+            # Teaching session dang active: moi turn tiep theo phai duoc gom vao session hien tai
+            # bat ke user co dung tu khoa "luu" hay khong — neu khong lam the agent se "quen" draft.
             existing_answer = normalize_text(parsed.get("answer"))
             if self._answer_claims_knowledge_write(existing_answer):
                 existing_answer = ""
-            active_teaching_id = chat_session.get("active_teaching_session_id", "")
-            if active_teaching_id:
-                # Dang soan do 1 dinh nghia -> bo sung vao session hien tai, KHONG tao session moi
-                # (tranh orphan draft cu va bat dau lai tu dau -> "quen" noi dung dang day).
-                parsed["action"] = "propose_append_teaching"
-                parsed["requires_confirmation"] = True
-                parsed["pending_action_type"] = "append_teaching"
-                parsed["payload"] = {"message": raw_message, "teaching_session_id": active_teaching_id}
-                parsed["answer"] = existing_answer or (
-                    "Mình bổ sung phần này vào định nghĩa đang soạn và lưu lại khi đủ thông tin nhé."
-                )
-                parsed["planner_fallback_reason"] = "forced_append_for_active_teaching"
-            else:
-                # Gom dinh nghia tu lich su hoi thoai: user co the dang yeu cau luu thu da ban tu truoc.
-                teaching_source = self._assemble_teaching_source(
-                    raw_message=raw_message, conversation_context=conversation_context
-                )
-                parsed["action"] = "propose_teaching"
-                parsed["requires_confirmation"] = True
-                parsed["pending_action_type"] = "start_teaching"
-                parsed["payload"] = {"message": teaching_source or raw_message}
-                parsed["answer"] = existing_answer or (
-                    "Mình hiểu bạn muốn lưu hoặc cập nhật một định nghĩa. "
-                    "Bạn nhắn 'ok' để mình lưu vào từ điển nhé."
-                )
-                parsed["planner_fallback_reason"] = "forced_teaching_for_knowledge_write"
+            parsed["action"] = "propose_append_teaching"
+            parsed["requires_confirmation"] = True
+            parsed["pending_action_type"] = "append_teaching"
+            parsed["payload"] = {"message": raw_message, "teaching_session_id": active_teaching_id}
+            parsed["answer"] = existing_answer or (
+                "Mình bổ sung phần này vào định nghĩa đang soạn và lưu lại khi đủ thông tin nhé."
+            )
+            parsed["planner_fallback_reason"] = "forced_append_for_active_teaching"
+        elif self._message_requests_knowledge_write(raw_message) and parsed["action"] in _safe_planner_actions:
+            # Khong co session active nhung user ro rang muon luu -> de xuat bat dau session moi.
+            existing_answer = normalize_text(parsed.get("answer"))
+            if self._answer_claims_knowledge_write(existing_answer):
+                existing_answer = ""
+            # Gom dinh nghia tu lich su hoi thoai: user co the dang yeu cau luu thu da ban tu truoc.
+            teaching_source = self._assemble_teaching_source(
+                raw_message=raw_message, conversation_context=conversation_context
+            )
+            parsed["action"] = "propose_teaching"
+            parsed["requires_confirmation"] = True
+            parsed["pending_action_type"] = "start_teaching"
+            parsed["payload"] = {"message": teaching_source or raw_message}
+            parsed["answer"] = existing_answer or (
+                "Mình hiểu bạn muốn lưu hoặc cập nhật một định nghĩa. "
+                "Bạn nhắn 'ok' để mình lưu vào từ điển nhé."
+            )
+            parsed["planner_fallback_reason"] = "forced_teaching_for_knowledge_write"
         parsed["_runtime_skills_used"] = [item.get("name", "") for item in compact_input.get("runtime_skills", []) if item.get("name")]
         parsed["_runtime_skill_candidates"] = compact_input.get("runtime_skill_candidates", [])
         parsed["_runtime_skill_selection_reason"] = compact_input.get("runtime_skill_selection_reason", "")
