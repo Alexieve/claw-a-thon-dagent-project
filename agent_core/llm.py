@@ -11,8 +11,6 @@ try:
 except ImportError:  # pragma: no cover - fallback to urllib khi httpx vắng mặt
     httpx = None
 
-from .utils import normalize_text
-
 
 # Lỗi coi như "không có kết quả" -> trả "" để caller fallback.
 _HTTP_ERRORS: tuple[type[Exception], ...] = (
@@ -143,4 +141,8 @@ class AgentLLMClient:
             content = data["choices"][0]["message"]["content"]
         except _HTTP_ERRORS:
             return ""
-        return normalize_text(content)
+        # GIU xuong dong cua noi dung LLM (markdown bang/list/code can \n de render dung tren FE);
+        # truoc day normalize_text flatten het \n -> answer thanh mot dong. Caller text dung
+        # _sanitize_user_answer/normalize_markdown_text de don whitespace, caller json dung
+        # json.loads (newline trong JSON vo hai). Chi strip dau/cuoi o day.
+        return content.strip() if isinstance(content, str) else ""
