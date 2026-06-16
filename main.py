@@ -4,11 +4,25 @@ import sys
 from dotenv import load_dotenv
 from greennode_agentbase import GreenNodeAgentBaseApp, PingStatus, RequestContext
 from greennode_agentbase.runtime.app import XAccelBufferingMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 
 from api_contracts import AgentApiRouter
 from knowledge_store import KnowledgeStore
+
+
+class SPAStaticFiles(StaticFiles):
+    """Serve a React SPA: return index.html for any path not found as a file."""
+
+    async def get_response(self, path: str, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
 
 
 load_dotenv()
@@ -52,6 +66,12 @@ def bootstrap_store() -> None:
         print("[startup] bootstrap OK", flush=True)
     except Exception as exc:
         print(f"[startup] bootstrap warning: {exc}", flush=True)
+
+
+_ui_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "dist")
+if os.path.isdir(_ui_dist):
+    app.mount("/", SPAStaticFiles(directory=_ui_dist, html=True), name="ui")
+    print(f"[startup] serving UI from {_ui_dist}", flush=True)
 
 
 if __name__ == "__main__":

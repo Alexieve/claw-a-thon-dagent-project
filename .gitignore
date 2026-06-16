@@ -13,3 +13,4 @@ venv/
 dist/
 build/
 zalopay/
+.claude/launch.json

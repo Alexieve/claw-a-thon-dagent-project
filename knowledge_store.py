@@ -2480,8 +2480,11 @@ class KnowledgeStore:
         return result
 
     def _append_chat_message(self, session: dict[str, Any], *, role: str, content: str) -> None:
+        # GIU xuong dong cua content (markdown bang/list/code fence) de FE render dung khi load
+        # lai lich su qua get_chat_history; truoc day normalize_text flatten het \n -> message
+        # luu thanh mot dong, FE vo layout (header/list/code dinh chum).
         session.setdefault("messages", [])
-        session["messages"].append({"role": role, "content": normalize_text(content), "created_at": now_iso()})
+        session["messages"].append({"role": role, "content": normalize_markdown_text(content), "created_at": now_iso()})
         session["messages"] = session["messages"][-20:]
 
     def _pending_chat_actions(self, session: dict[str, Any], action_type: str = "") -> list[dict[str, Any]]:
@@ -3657,7 +3660,10 @@ class KnowledgeStore:
         response["examples"] = context.get("examples", [])
 
     def _append_assistant_context_event(self, chat_session: dict[str, Any], answer: str) -> None:
-        content = normalize_text(answer)
+        # GIU xuong dong cua answer (markdown header/list/code fence) de FE render dung khi load
+        # lai lich su; truoc day normalize_text flatten het \n -> message luu thanh mot dong.
+        # Newline trong context event day vao Memory vo hai cho LLM.
+        content = normalize_markdown_text(answer)
         if not content:
             return
         self._append_chat_message(chat_session, role="assistant", content=content)

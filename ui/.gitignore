@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+# Committed: drives the production build (relative API URL for same-origin deploy). No secrets.
+!.env.production
+
+# Husky scaffolding (inactive: references pnpm/lint-staged which this bun project does not use)
+.husky/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Turbo cache
+.turbo/
+
+# Vercel
+.vercel/
+
+# TanStack Router cache
+.tanstack/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

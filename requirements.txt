@@ -4,3 +4,4 @@ psycopg[binary]
 psycopg_pool
 httpx
 openpyxl
+aiofiles

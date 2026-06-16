@@ -12,3 +12,7 @@ __pycache__/
 .gitignore
 *.md
 !.codex/skills/**/SKILL.md
+ui/node_modules/
+ui/dist/
+# Keep the production env (relative API URL) so the in-image vite build serves same-origin.
+!ui/.env.production
