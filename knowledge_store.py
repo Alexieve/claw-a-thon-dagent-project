@@ -1764,7 +1764,10 @@ class KnowledgeStore:
             parsed["used_context_terms"] = []
         _safe_planner_actions = {"answer_direct", "ask_clarification", "recall_conversation", "noop"}
         active_teaching_id = normalize_text(chat_session.get("active_teaching_session_id", ""))
-        if active_teaching_id and parsed["action"] in _safe_planner_actions:
+        # propose_teaching khi co session active se tao session moi, bỏ rơi draft cu -> "quên".
+        # Redirect sang append thay the de gom vao session dang mo.
+        _append_redirect_actions = _safe_planner_actions | {"propose_teaching"}
+        if active_teaching_id and parsed["action"] in _append_redirect_actions:
             # Teaching session dang active: moi turn tiep theo phai duoc gom vao session hien tai
             # bat ke user co dung tu khoa "luu" hay khong — neu khong lam the agent se "quen" draft.
             existing_answer = normalize_text(parsed.get("answer"))

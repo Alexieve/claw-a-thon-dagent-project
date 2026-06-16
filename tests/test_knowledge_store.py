@@ -1413,6 +1413,31 @@ class TeachingMemoryRegressionTest(unittest.TestCase):
         self.assertIn("first payment", turn3["knowledge_created"][0]["canonical_definition"])
         self.assertEqual(store.search_knowledge("FPU")[0]["name"], "FPU")
 
+    def test_active_session_redirects_propose_teaching_to_append(self):
+        # Production: sau khi confirm (session active), user cung cap dinh nghia nhung planner
+        # phan loai la `propose_teaching` -> phai redirect sang append + tu luu, KHONG tao session moi.
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {"action": "propose_teaching", "answer": "Bạn nhắn ok để mình lưu nhé.", "confidence": 0.9},
+                    {"action": "propose_teaching", "answer": "Mình hiểu định nghĩa rồi.", "confidence": 0.9},
+                ]
+            )
+        )
+        store.chat(message="lưu định nghĩa cho ZZTERM", user_id="quynh", session_id="redir-flow")
+        store.chat(message="ok", user_id="quynh", session_id="redir-flow")
+        active_before = store._load_chat_session("redir-flow")["active_teaching_session_id"]
+        self.assertTrue(active_before)
+
+        turn3 = store.chat(message="ZZTERM là user có giao dịch thành công", user_id="quynh", session_id="redir-flow")
+        # propose_teaching khi co session active phai bi redirect sang append -> tu luu, khong tao moi.
+        self.assertNotEqual(turn3["pending_action_type"], "start_teaching")
+        self.assertFalse(turn3["requires_confirmation"])
+        self.assertEqual(turn3["status"], "committed")
+        self.assertTrue(turn3["knowledge_created"])
+        # Khong duoc sinh teaching session thu hai.
+        self.assertEqual(len(store._load_teaching_sessions()["sessions"]), 1)
+
     def test_forced_knowledge_write_appends_to_active_session_instead_of_new_one(self):
         store = self.make_store(
             llm_client=FakeChatLLM(
