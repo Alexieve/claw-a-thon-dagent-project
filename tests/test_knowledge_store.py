@@ -3,6 +3,7 @@ import time
 import unittest
 from pathlib import Path
 
+from agent_core.utils import normalize_markdown_text
 from knowledge_store import KnowledgeParser, KnowledgeStore, RuntimeSkillRegistry, extract_acronyms
 
 
@@ -1466,6 +1467,60 @@ class TeachingMemoryRegressionTest(unittest.TestCase):
         # Noi dung phai duoc append thang vao session dang soan (truoc fix: chi de xuat start moi).
         messages_after = len(store._get_teaching_session(active_before)["messages"])
         self.assertEqual(messages_after, messages_before + 1)
+
+
+class MarkdownAnswerFormattingTest(unittest.TestCase):
+    def make_store(self) -> KnowledgeStore:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        store = KnowledgeStore(
+            raw_events_path=root / "raw_events.jsonl",
+            candidates_path=root / "knowledge_candidates.json",
+            knowledge_base_path=root / "knowledge_base.json",
+            document_chunks_path=root / "document_chunks.jsonl",
+            teaching_sessions_path=root / "teaching_sessions.json",
+            chat_sessions_path=root / "chat_sessions.json",
+            data_dictionary_path=root / "data_dictionary.json",
+            question_examples_path=root / "question_examples.json",
+            parser=KnowledgeParser(),
+        )
+        store.bootstrap()
+        return store
+
+    def test_normalize_markdown_text_preserves_newlines_and_tables(self):
+        raw = (
+            "Kết quả:\n\n"
+            "| Tháng | FPU |\n"
+            "|-------|-----|\n"
+            "| 2026-01 | 2,742 |   \n"
+            "| 2026-02 | 2,851 |\n\n\n\n"
+            "**Lưu ý:** chỉ có đến 2026-02."
+        )
+        out = normalize_markdown_text(raw)
+        # Xuong dong phai con (bang markdown khong bi dồn ve mot dong).
+        self.assertIn("\n", out)
+        self.assertEqual(out.count("\n| 2026-01"), 1)
+        # Khoang trang cuoi dong bi cat.
+        self.assertNotIn("|   \n", out)
+        # 3+ dong trong gop ve toi da mot dong trong (2 newline).
+        self.assertNotIn("\n\n\n", out)
+        # Plain text giua cac dong van con nguyen.
+        self.assertIn("**Lưu ý:**", out)
+
+    def test_normalize_markdown_text_keeps_code_block_indentation(self):
+        raw = "```sql\nSELECT *\n    FROM payment_air\n```"
+        out = normalize_markdown_text(raw)
+        self.assertIn("    FROM payment_air", out)
+
+    def test_sanitize_user_answer_does_not_flatten_markdown(self):
+        store = self.make_store()
+        answer = "Dòng 1\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```sql\nSELECT 1\n```"
+        cleaned = store._sanitize_user_answer(answer)
+        # Bug cu: normalize_text flatten het \n -> chi con mot dong. Gio phai con nhieu dong.
+        self.assertGreater(cleaned.count("\n"), 3)
+        self.assertIn("| A | B |", cleaned)
+        self.assertIn("```sql", cleaned)
 
 
 if __name__ == "__main__":

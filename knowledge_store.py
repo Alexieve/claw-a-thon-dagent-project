@@ -49,6 +49,7 @@ from agent_core.utils import (
     new_id,
     normalize_confidence,
     normalize_lookup,
+    normalize_markdown_text,
     normalize_text,
     now_iso,
     parse_bool_flag,
@@ -1994,7 +1995,9 @@ class KnowledgeStore:
     ) -> dict[str, Any]:
         action = normalize_lookup(plan.get("action"))
         payload = plan.get("payload", {}) if isinstance(plan.get("payload"), dict) else {}
-        planner_answer = normalize_text(plan.get("answer"))
+        # Giu xuong dong cho cau tra loi planner (knowledge Q&A co the co bang/list markdown);
+        # cac cho can flatten se tu goi normalize_text cuc bo.
+        planner_answer = normalize_markdown_text(plan.get("answer"))
         debug = self._planner_debug(plan)
 
         if action == "answer_direct":
@@ -3404,17 +3407,17 @@ class KnowledgeStore:
         if skip_reason:
             debug["answer_synthesis_used"] = False
             debug["answer_synthesis_fallback_reason"] = skip_reason
-            response["answer"] = self._sanitize_user_answer(normalize_text(response.get("answer")))
+            response["answer"] = self._sanitize_user_answer(response.get("answer"))
             self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
             return
         if not self._llm_configured():
             debug["answer_synthesis_used"] = False
             debug["answer_synthesis_fallback_reason"] = "llm_not_configured"
-            response["answer"] = self._sanitize_user_answer(normalize_text(response.get("answer")))
+            response["answer"] = self._sanitize_user_answer(response.get("answer"))
             self._record_chat_latency(chat_session, "answer_synthesis", synthesis_started)
             return
 
-        fallback_answer = self._sanitize_user_answer(normalize_text(response.get("answer")))
+        fallback_answer = self._sanitize_user_answer(response.get("answer"))
         payload = self._answer_synthesis_payload(response=response, chat_session=chat_session, pending_action=pending_action)
         try:
             synthesized = self.llm_client.complete_text(
@@ -3593,7 +3596,9 @@ class KnowledgeStore:
         return {"term": term, "definition_so_far": definition_so_far}
 
     def _sanitize_user_answer(self, answer: str) -> str:
-        cleaned = normalize_text(answer)
+        # GIU xuong dong de markdown (bang/list/code fence) hien thi dung tren FE;
+        # truoc day dung normalize_text se flatten het \n -> answer thanh mot dong, FE vo layout.
+        cleaned = normalize_markdown_text(answer)
         cleaned = re.sub(r"`?pending_action_id\s*=\s*[^`\s,.;]+`?", "yêu cầu đang chờ xác nhận", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"Pending action id:\s*`?[^`\s,.;]+`?", "Yêu cầu này đang chờ xác nhận.", cleaned, flags=re.IGNORECASE)
         return cleaned.strip()

@@ -20,6 +20,23 @@ def normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def normalize_markdown_text(value: Any) -> str:
+    """Chuan hoa text markdown cho FE nhung GIU xuong dong.
+
+    Khac normalize_text (flatten moi whitespace ve mot dong, lam vo bang/list/code
+    block khi hien thi tren FE): ham nay chi
+      - quy CRLF/CR ve LF,
+      - bo khoang trang thua o CUOI moi dong (giu thut dau dong cho code block),
+      - gop 3+ dong trong lien tiep ve toi da mot dong trong,
+      - strip dau/cuoi.
+    Nho vay markdown (bang, danh sach, code fence) van xuong dong dung khi render.
+    """
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    return cleaned.strip()
+
+
 def normalize_lookup(value: Any) -> str:
     return normalize_text(value).casefold()
 
