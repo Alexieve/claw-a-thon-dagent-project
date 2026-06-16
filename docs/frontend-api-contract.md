@@ -329,7 +329,9 @@ Important: FE không parse `answer` để tìm `pending_action_id`, SQL, trạng
 
 Fast-path sau này có thể đổi `intent` hoặc giảm debug latency, nhưng không nên đổi rule UI ở bảng trên.
 
-## 8. Data Query + Confirm Workflow
+## 8. Confirm Workflows (Data Query & Teaching)
+
+### 8.A. Data Query
 
 Flow data mơ hồ:
 
@@ -362,6 +364,39 @@ sequenceDiagram
   API-->>FE: status = "sql_draft" hoặc "needs_dictionary"
   FE-->>U: Render answer, optionally SQL/missing cards
 ```
+
+### 8.B. Teaching (Save Terminology)
+
+Khi user muốn dạy/lưu một định nghĩa (term/metric), flow đi qua action `chat`. **FE không cần thay đổi gì** so với confirm workflow ở trên — chỉ cần tiếp tục gửi cùng `session_id` và render theo `status`/`session_state`. Không có field mới.
+
+1. User nêu ý định lưu (vd "lưu định nghĩa FPU"). Backend trả `status = "needs_confirmation"`, `pending_action_type = "start_teaching"`, `session_state = "teaching_pending"`. FE show Confirm/Cancel như bình thường.
+2. User confirm (`message: "confirm"` + `pending_action_id`, hoặc câu chấp nhận tự nhiên như "ok"/"lưu đi"). Backend mở teaching session:
+   - Nếu nội dung đã đủ (có tên + định nghĩa) → lưu luôn: `status = "committed"` (term mới) hoặc `"pending_approval"` (term đã tồn tại → tạo change request chờ owner duyệt). `session_state` về `"idle"`.
+   - Nếu chưa đủ → `status = "needs_clarification"`, `requires_confirmation = false`, `session_state = "teaching_draft_active"`. Backend hỏi thêm phần còn thiếu qua `answer` + `missing`.
+3. **Bổ sung (append) KHÔNG cần confirm lại từng lượt.** Khi `session_state = "teaching_draft_active"`, FE chỉ cần gửi tiếp câu trả lời của user trong **cùng `session_id`**. Backend tự gom phần bổ sung vào định nghĩa đang soạn (nhớ ngữ cảnh giữa các lượt) và **tự động lưu ngay khi đủ** (`committed`/`pending_approval`). Mỗi lượt bổ sung chỉ là `needs_clarification` (còn thiếu) hoặc `committed`/`pending_approval` (đã đủ) — **không phát sinh thêm bước `needs_confirmation`**.
+4. User có thể hủy bất cứ lúc nào bằng "cancel"/"hủy" → `status = "cancelled"`, FE clear pending UI.
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant FE as Frontend
+  participant API as POST /invocations
+
+  U->>FE: "Lưu định nghĩa FPU"
+  FE->>API: { action: "chat", message, session_id }
+  API-->>FE: status="needs_confirmation", pending_action_type="start_teaching", session_state="teaching_pending"
+  U->>FE: Click Confirm / "ok"
+  FE->>API: { message: "confirm", session_id, pending_action_id }
+  API-->>FE: status="needs_clarification", session_state="teaching_draft_active" (hỏi thêm định nghĩa)
+  U->>FE: "FPU là user có first payment"
+  FE->>API: { action: "chat", message, same session_id }   (KHÔNG cần confirm)
+  API-->>FE: status="committed" (hoặc "pending_approval"), session_state="idle"
+```
+
+Lưu ý FE:
+- **Đừng reset session** khi `session_state = "teaching_draft_active"`: tiếp tục dùng đúng `session_id` để backend nhớ định nghĩa đang soạn dở. (Nếu mỗi lượt FE tạo session mới thì agent sẽ "quên" và hỏi lại từ đầu.)
+- `committed` = đã ghi vào từ điển; `pending_approval` = term đã tồn tại nên backend tạo yêu cầu cập nhật chờ owner duyệt (show trạng thái "chờ duyệt", không phải lỗi).
+- Vẫn chỉ đọc structured fields: `status`, `session_state`, `requires_confirmation`, `pending_action_*`, `answer`, `missing`. Không parse `answer`.
 
 ## 9. Example Responses
 
@@ -567,7 +602,7 @@ Useful debug fields:
 | `planner_used` | `true` nếu LLM planner được gọi. |
 | `planner_action` | Action planner chọn: `answer_direct`, `ask_clarification`, `propose_data_query`, v.v. |
 | `planner_confidence` | Confidence score của planner (0–1). |
-| `planner_fallback_reason` | Lý do fallback planner, ví dụ `invalid_planner_action`, `forced_teaching_for_knowledge_write`. |
+| `planner_fallback_reason` | Lý do fallback planner, ví dụ `invalid_planner_action`, `forced_teaching_for_knowledge_write` (ép start teaching), `forced_append_for_active_teaching` (đang có teaching session → ép bổ sung thay vì tạo mới). |
 | `runtime_skills_used` | Danh sách runtime skill đã dùng, ví dụ `["air-sql-analyst"]`. |
 | `active_runtime_skill` | Runtime skill đang active trong session. |
 | `context_fallback_reason` | Lý do context backend fall về local, ví dụ `missing_user_or_session`. |

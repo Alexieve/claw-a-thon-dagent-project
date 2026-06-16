@@ -416,6 +416,24 @@ class KnowledgeStore:
         self._save_teaching_session(session)
         return self._teaching_session_response(session)
 
+    def _teaching_context_snapshot(self, session_id: str) -> dict[str, Any]:
+        """Doc draft teaching hien tai lam context cho planner — READ-ONLY.
+
+        KHONG parse lai, KHONG ghi DB: chi tra ve draft/status da luu o luot append gan nhat.
+        Tranh viec moi luot chat build context lai parse + ghi de draft -> mat tri nho (RC1).
+        """
+        try:
+            session = self._get_teaching_session(session_id)
+        except ValueError:
+            return {"session_id": session_id, "status": "missing"}
+        draft = session.get("draft") if isinstance(session.get("draft"), dict) else {}
+        return {
+            "session_id": session_id,
+            "status": session.get("status"),
+            "summary": self._draft_summary(draft) if draft else {},
+            "draft": draft,
+        }
+
     def confirm_teach_session(self, *, session_id: str, decision: str = "confirm") -> dict[str, Any]:
         session = self._get_teaching_session(session_id)
         normalized_decision = normalize_lookup(decision)
@@ -1218,11 +1236,15 @@ class KnowledgeStore:
             domain=session.get("domain", ""),
             owner=session.get("owner", ""),
         )
-        draft = candidates[0] if candidates else {}
+        parsed = candidates[0] if candidates else {}
+        existing = session.get("draft") if isinstance(session.get("draft"), dict) else {}
+        # Gop ket qua parse moi VAO draft cu (khong ghi de) de teaching session khong "quen"
+        # field da trich xuat o luot truoc khi lan parse sau tra ve it field hon hoac rong.
+        draft = self._merge_teaching_draft(existing, parsed)
         if draft:
-            existing = self._find_knowledge_by_name(draft.get("name", ""))
-            draft["existing_knowledge"] = bool(existing)
-            draft["target_knowledge_id"] = existing["id"] if existing else ""
+            existing_knowledge = self._find_knowledge_by_name(draft.get("name", ""))
+            draft["existing_knowledge"] = bool(existing_knowledge)
+            draft["target_knowledge_id"] = existing_knowledge["id"] if existing_knowledge else ""
             session["draft"] = draft
             if force_confirmation or (draft.get("definition") and normalize_confidence(draft.get("confidence")) >= 0.5):
                 session["status"] = "awaiting_confirmation"
@@ -1233,6 +1255,39 @@ class KnowledgeStore:
             session["status"] = "clarifying"
         session["updated_at"] = now_iso()
         return session
+
+    def _merge_teaching_draft(self, existing: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
+        """Hop nhat draft moi parse vao draft cu thay vi ghi de.
+
+        - Scalar (name/definition/domain/owner/formula/kind): uu tien gia tri moi neu khong rong,
+          nguoc lai giu gia tri cu (mot lan parse thieu field se khong lam mat tri nho).
+        - List (paraphrases/conditions/examples): hop nhat (union).
+        - confidence: lay max. id/source_event_id/created_at/status: giu cua draft cu cho on dinh.
+        """
+        existing = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+        parsed = parsed if isinstance(parsed, dict) else {}
+        if not existing:
+            return copy.deepcopy(parsed)
+        if not parsed:
+            return existing
+        merged = existing
+        list_fields = {"paraphrases", "conditions", "examples"}
+        keep_existing = {"id", "source_event_id", "created_at", "status"}
+        for key, new_value in parsed.items():
+            if key in keep_existing and merged.get(key):
+                continue
+            if key in list_fields:
+                base = merged.get(key) if isinstance(merged.get(key), list) else []
+                incoming = new_value if isinstance(new_value, list) else []
+                merged[key] = unique_values(base + incoming)
+            elif key == "confidence":
+                merged[key] = max(normalize_confidence(merged.get(key)), normalize_confidence(new_value))
+            elif isinstance(new_value, str):
+                if normalize_text(new_value):
+                    merged[key] = new_value
+            elif new_value is not None:
+                merged[key] = new_value
+        return merged
 
     def _teaching_session_response(self, session: dict[str, Any]) -> dict[str, Any]:
         response = {"session": copy.deepcopy(session), "session_id": session["id"], "status": session["status"]}
@@ -1277,7 +1332,12 @@ class KnowledgeStore:
     def _save_teaching_session(self, session: dict[str, Any]) -> None:
         if session.get("status") not in ALLOWED_TEACHING_SESSION_STATUSES:
             session["status"] = "clarifying"
-        self._save_record(self.teaching_sessions_path, session)
+        if self.db:
+            self._persist_with_retry(
+                "teaching_session", lambda: self._save_record(self.teaching_sessions_path, session)
+            )
+        else:
+            self._save_record(self.teaching_sessions_path, session)
 
     def _approve_candidate(self, candidate: dict[str, Any]) -> dict[str, Any] | None:
         if candidate.get("status") == "pending_change" or candidate.get("target_knowledge_id"):
@@ -1713,19 +1773,32 @@ class KnowledgeStore:
             existing_answer = normalize_text(parsed.get("answer"))
             if self._answer_claims_knowledge_write(existing_answer):
                 existing_answer = ""
-            # Gom dinh nghia tu lich su hoi thoai: user co the dang yeu cau luu thu da ban tu truoc.
-            teaching_source = self._assemble_teaching_source(
-                raw_message=raw_message, conversation_context=conversation_context
-            )
-            parsed["action"] = "propose_teaching"
-            parsed["requires_confirmation"] = True
-            parsed["pending_action_type"] = "start_teaching"
-            parsed["payload"] = {"message": teaching_source or raw_message}
-            parsed["answer"] = existing_answer or (
-                "Mình hiểu bạn muốn lưu hoặc cập nhật một định nghĩa. "
-                "Bạn nhắn 'ok' để mình lưu vào từ điển nhé."
-            )
-            parsed["planner_fallback_reason"] = "forced_teaching_for_knowledge_write"
+            active_teaching_id = chat_session.get("active_teaching_session_id", "")
+            if active_teaching_id:
+                # Dang soan do 1 dinh nghia -> bo sung vao session hien tai, KHONG tao session moi
+                # (tranh orphan draft cu va bat dau lai tu dau -> "quen" noi dung dang day).
+                parsed["action"] = "propose_append_teaching"
+                parsed["requires_confirmation"] = True
+                parsed["pending_action_type"] = "append_teaching"
+                parsed["payload"] = {"message": raw_message, "teaching_session_id": active_teaching_id}
+                parsed["answer"] = existing_answer or (
+                    "Mình bổ sung phần này vào định nghĩa đang soạn và lưu lại khi đủ thông tin nhé."
+                )
+                parsed["planner_fallback_reason"] = "forced_append_for_active_teaching"
+            else:
+                # Gom dinh nghia tu lich su hoi thoai: user co the dang yeu cau luu thu da ban tu truoc.
+                teaching_source = self._assemble_teaching_source(
+                    raw_message=raw_message, conversation_context=conversation_context
+                )
+                parsed["action"] = "propose_teaching"
+                parsed["requires_confirmation"] = True
+                parsed["pending_action_type"] = "start_teaching"
+                parsed["payload"] = {"message": teaching_source or raw_message}
+                parsed["answer"] = existing_answer or (
+                    "Mình hiểu bạn muốn lưu hoặc cập nhật một định nghĩa. "
+                    "Bạn nhắn 'ok' để mình lưu vào từ điển nhé."
+                )
+                parsed["planner_fallback_reason"] = "forced_teaching_for_knowledge_write"
         parsed["_runtime_skills_used"] = [item.get("name", "") for item in compact_input.get("runtime_skills", []) if item.get("name")]
         parsed["_runtime_skill_candidates"] = compact_input.get("runtime_skill_candidates", [])
         parsed["_runtime_skill_selection_reason"] = compact_input.get("runtime_skill_selection_reason", "")
@@ -1758,16 +1831,7 @@ class KnowledgeStore:
         active_teaching = {}
         teaching_session_id = chat_session.get("active_teaching_session_id", "")
         if teaching_session_id:
-            try:
-                teaching = self.summarize_teach_session(session_id=teaching_session_id)
-                active_teaching = {
-                    "session_id": teaching_session_id,
-                    "status": teaching.get("status"),
-                    "summary": teaching.get("summary", {}),
-                    "draft": teaching.get("draft", {}),
-                }
-            except ValueError:
-                active_teaching = {"session_id": teaching_session_id, "status": "missing"}
+            active_teaching = self._teaching_context_snapshot(teaching_session_id)
         return {
             "raw_message": raw_message,
             # Planner chỉ cần đủ ngữ cảnh gần để CHỌN action; lịch sử đầy đủ vẫn dùng ở bước
@@ -2053,7 +2117,8 @@ class KnowledgeStore:
             )
 
         if action == "propose_append_teaching":
-            if not chat_session.get("active_teaching_session_id"):
+            teaching_session_id = chat_session.get("active_teaching_session_id", "")
+            if not teaching_session_id:
                 response = {
                     "status": "needs_clarification",
                     "intent": "clarification",
@@ -2066,12 +2131,27 @@ class KnowledgeStore:
                     "debug": {**debug, "planner_fallback_reason": "append_without_active_teaching"},
                 }
                 return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
-            return self._propose_append_teaching_action(
+            # User da dong y day knowledge tu buoc start -> bo sung thang vao draft, khong bat
+            # confirm lai tung luot. Khi draft du thi tu dong luu (dung design air-teaching).
+            append_message = normalize_text(payload.get("message")) or raw_message
+            try:
+                result = self.append_teach_message(session_id=teaching_session_id, message=append_message)
+            except ValueError:
+                return self._teaching_needs_more_info_response(
+                    chat_session=chat_session,
+                    result={"session_id": teaching_session_id, "draft": {}, "status": "clarifying"},
+                    message=raw_message,
+                )
+            if result.get("status") == "awaiting_confirmation":
+                return self._auto_commit_teaching(
+                    chat_session=chat_session,
+                    teaching_session_id=teaching_session_id,
+                    message=raw_message,
+                )
+            return self._teaching_needs_more_info_response(
                 chat_session=chat_session,
-                message=normalize_text(payload.get("message")) or raw_message,
-                llm_used=True,
-                planner_answer=planner_answer,
-                planner_debug=debug,
+                result=result,
+                message=raw_message,
             )
 
         if action == "propose_commit_teaching":
@@ -2335,6 +2415,24 @@ class KnowledgeStore:
             "updated_at": now_iso(),
         }
 
+    def _persist_with_retry(self, label: str, write_fn) -> None:
+        """Ghi state quan trong (chat/teaching session) co retry 1 lan.
+
+        Deployment scale-to-zero + Supabase pooler -> 1 loi ghi thoang qua co the lam mat
+        active_teaching_session_id/draft khien luot sau "quen". Retry 1 lan giam ti le do; neu
+        van fail thi raise (turn fail sach, client retry tren state cu nguyen ven) kem log.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                write_fn()
+                return
+            except Exception as exc:  # noqa: BLE001 - log + retry roi raise lai
+                last_exc = exc
+                print(f"[persist] {label} attempt {attempt + 1} failed: {exc}", flush=True)
+        if last_exc is not None:
+            raise last_exc
+
     def _save_chat_session(self, session: dict[str, Any]) -> None:
         session["state"] = self._chat_session_state(session)
         session["updated_at"] = now_iso()
@@ -2353,11 +2451,14 @@ class KnowledgeStore:
         if self.db:
             save_one = getattr(self.db, "save_chat_session", None)
             if callable(save_one):
-                save_one(persisted)
+                self._persist_with_retry("chat_session", lambda: save_one(persisted))
             else:
-                data = self._load_chat_sessions()
-                data["sessions"][session["id"]] = persisted
-                self.db.save_chat_sessions(data)
+                def _full_chat_save() -> None:
+                    data = self._load_chat_sessions()
+                    data["sessions"][session["id"]] = persisted
+                    self.db.save_chat_sessions(data)
+
+                self._persist_with_retry("chat_sessions", _full_chat_save)
         else:
             data = self._load_chat_sessions()
             data["sessions"][session["id"]] = persisted
@@ -2532,6 +2633,18 @@ class KnowledgeStore:
     def _recover_save_from_context(self, *, chat_session: dict[str, Any], message: str) -> dict[str, Any]:
         """User xac nhan nhung khong con pending action. Neu agent vua de xuat luu mot dinh nghia,
         dung lai noi dung tu hoi thoai va luu luon (vi user da xac nhan ro rang)."""
+        active_teaching_id = chat_session.get("active_teaching_session_id", "")
+        if active_teaching_id:
+            # Da co session dang soan -> luu chinh no thay vi tao session moi (tranh "quen" draft cu).
+            # Neu draft chua du, confirm se nem ValueError -> de luong binh thuong hoi them.
+            try:
+                return self._auto_commit_teaching(
+                    chat_session=chat_session,
+                    teaching_session_id=active_teaching_id,
+                    message=message,
+                )
+            except ValueError:
+                return {}
         if not self._recent_assistant_proposed_save(chat_session):
             return {}
         source = self._assemble_teaching_source_from_session(chat_session)
@@ -3228,41 +3341,6 @@ class KnowledgeStore:
                     "type": "confirmation",
                     "concept": "start_teaching",
                     "question": "Bạn muốn mình lưu định nghĩa này vào từ điển metric của team không?",
-                }
-            ],
-            "used_knowledge_ids": [],
-            "used_dictionary_ids": [],
-            "used_example_ids": [],
-            "debug": debug,
-        }
-        return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=True, pending_action=action)
-
-    def _propose_append_teaching_action(
-        self,
-        *,
-        chat_session: dict[str, Any],
-        message: str,
-        llm_used: bool,
-        planner_answer: str = "",
-        planner_debug: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        self._cancel_pending_chat_actions(chat_session, action_type="commit_teaching", reason="draft_append_requested")
-        action = self._create_pending_chat_action(
-            chat_session,
-            action_type="append_teaching",
-            payload={"message": message, "teaching_session_id": chat_session.get("active_teaching_session_id", "")},
-        )
-        debug = planner_debug or {"llm_used": llm_used, "fallback_used": not llm_used}
-        response = {
-            "status": "needs_confirmation",
-            "intent": "teach_knowledge",
-            "answer": normalize_text(planner_answer) or "Mình hiểu đây là phần bổ sung cho định nghĩa bạn đang soạn. Bạn nhắn 'ok' để mình thêm vào và lưu lại nhé.",
-            "question": message,
-            "missing": [
-                {
-                    "type": "confirmation",
-                    "concept": "append_teaching",
-                    "question": "Bạn muốn mình thêm nội dung này vào định nghĩa đang soạn không?",
                 }
             ],
             "used_knowledge_ids": [],

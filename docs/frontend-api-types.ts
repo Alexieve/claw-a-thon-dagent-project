@@ -82,7 +82,11 @@ export type ChatIntent =
 export interface PendingAction {
   /** Pending action id to send back as pending_action_id on confirm/cancel. */
   id: string;
-  /** Action category. FE mainly cares about data_query for chat phase 1. */
+  /**
+   * Action category. FE mainly cares about data_query and start_teaching (both confirm-gated).
+   * append_teaching / commit_teaching are now handled automatically once a teaching session is
+   * active, so FE rarely sees them as a pending action requiring a separate confirm.
+   */
   type: "data_query" | "start_teaching" | "append_teaching" | "commit_teaching" | string;
   /** "pending" when active, empty string when no active action. */
   status: "pending" | "";
@@ -158,7 +162,13 @@ export interface ChatResult {
   pending_action: PendingAction;
   /** Valid confirmation commands for the pending action. */
   confirm_options: string[];
-  /** High-level session state. */
+  /**
+   * High-level session state.
+   * - "teaching_pending": a start_teaching action awaits confirm.
+   * - "teaching_draft_active": a definition is being drafted. Keep sending the SAME session_id;
+   *   the backend auto-appends each follow-up and auto-saves when complete — no extra confirm per turn.
+   *   Do NOT start a new session here or the agent will "forget" the in-progress definition.
+   */
   session_state: "idle" | "data_query_pending" | "teaching_pending" | "teaching_draft_active" | string;
   /** Resolved question after context/follow-up handling. */
   resolved_question: string;

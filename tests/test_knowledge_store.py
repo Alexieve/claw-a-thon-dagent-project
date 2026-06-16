@@ -1291,5 +1291,157 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(status["session_state"], "idle")
 
 
+class SequenceParser(KnowledgeParser):
+    """Tra ve ket qua parse theo kich ban (mo phong parse khong on dinh giua cac luot)."""
+
+    def __init__(self, sequence) -> None:
+        super().__init__()
+        self._sequence = list(sequence)
+        self.calls = 0
+
+    def parse(self, *, text, source_event_id, stakeholder="", team="", domain="", owner=""):
+        self.calls += 1
+        if self._sequence:
+            return self._sequence.pop(0)
+        return []
+
+
+class RaisingParser(KnowledgeParser):
+    """Nem loi neu parse bi goi — dung de chung minh duong context la read-only."""
+
+    def parse(self, *, text, source_event_id, stakeholder="", team="", domain="", owner=""):
+        raise AssertionError("parser.parse must not run while building read-only teaching context")
+
+
+class TeachingMemoryRegressionTest(unittest.TestCase):
+    def make_store(self, parser=None, llm_client=None, **kwargs) -> KnowledgeStore:
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        root = Path(tmpdir.name)
+        store = KnowledgeStore(
+            raw_events_path=root / "raw_events.jsonl",
+            candidates_path=root / "knowledge_candidates.json",
+            knowledge_base_path=root / "knowledge_base.json",
+            document_chunks_path=root / "document_chunks.jsonl",
+            teaching_sessions_path=root / "teaching_sessions.json",
+            chat_sessions_path=root / "chat_sessions.json",
+            data_dictionary_path=root / "data_dictionary.json",
+            question_examples_path=root / "question_examples.json",
+            parser=parser or KnowledgeParser(),
+            llm_client=llm_client,
+            **kwargs,
+        )
+        store.bootstrap()
+        return store
+
+    def test_merge_teaching_draft_keeps_fields_when_reparse_drops_them(self):
+        store = self.make_store()
+        existing = {
+            "id": "cand_a",
+            "name": "FPU",
+            "definition": "user có first payment",
+            "domain": "Growth",
+            "paraphrases": ["first payer"],
+            "formula": "count(first_payment)",
+            "confidence": 0.72,
+        }
+        downgraded = {
+            "id": "cand_b",
+            "name": "FPU",
+            "definition": "",
+            "domain": "",
+            "paraphrases": ["fp user"],
+            "formula": None,
+            "confidence": 0.3,
+        }
+        merged = store._merge_teaching_draft(existing, downgraded)
+        self.assertEqual(merged["definition"], "user có first payment")
+        self.assertEqual(merged["domain"], "Growth")
+        self.assertEqual(merged["formula"], "count(first_payment)")
+        self.assertEqual(merged["confidence"], 0.72)
+        self.assertEqual(merged["paraphrases"], ["first payer", "fp user"])
+        self.assertEqual(merged["id"], "cand_a")
+
+    def test_refresh_does_not_wipe_draft_when_reparse_returns_nothing(self):
+        parser = SequenceParser([[{"name": "NPU", "definition": "New Paying User", "confidence": 0.8}]])
+        store = self.make_store(parser=parser)
+        session = {"id": "teach_x", "messages": [{"role": "user", "content": "NPU"}], "draft": {}}
+        store._refresh_teaching_session(session)
+        self.assertEqual(session["draft"]["definition"], "New Paying User")
+        # Luot parse thu hai khong tra ve gi -> draft cu phai duoc giu nguyen (khong "quen").
+        store._refresh_teaching_session(session)
+        self.assertEqual(session["draft"]["definition"], "New Paying User")
+        self.assertEqual(session["draft"]["name"], "NPU")
+
+    def test_teaching_context_snapshot_is_read_only(self):
+        store = self.make_store()
+        started = store.start_teach_session(message="NPU là New Paying User")
+        before = store._get_teaching_session(started["session_id"])["draft"]
+        # Sau khi da co draft, build context KHONG duoc parse lai / ghi de.
+        store.parser = RaisingParser()
+        snapshot = store._teaching_context_snapshot(started["session_id"])
+        self.assertIn("New Paying User", snapshot["draft"]["definition"])
+        self.assertEqual(snapshot["session_id"], started["session_id"])
+        after = store._get_teaching_session(started["session_id"])["draft"]
+        self.assertEqual(before, after)
+
+    def test_multi_turn_teaching_appends_and_saves_without_second_confirm(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {"action": "propose_teaching", "answer": "Bạn nhắn ok để mình lưu nhé.", "confidence": 0.9},
+                    {"action": "propose_append_teaching", "answer": "Mình bổ sung nhé.", "confidence": 0.9},
+                ]
+            )
+        )
+        turn1 = store.chat(message="lưu định nghĩa FPU", user_id="quynh", session_id="teach-flow")
+        self.assertEqual(turn1["status"], "needs_confirmation")
+        self.assertEqual(turn1["pending_action_type"], "start_teaching")
+
+        turn2 = store.chat(message="ok", user_id="quynh", session_id="teach-flow")
+        self.assertEqual(turn2["intent"], "teach_knowledge")
+        self.assertEqual(turn2["session_state"], "teaching_draft_active")
+        active_id = store._load_chat_session("teach-flow")["active_teaching_session_id"]
+        self.assertTrue(active_id)
+
+        turn3 = store.chat(message="FPU là user có first payment", user_id="quynh", session_id="teach-flow")
+        # Bo sung dinh nghia xong la tu dong luu, KHONG bat confirm them mot lan nua.
+        self.assertFalse(turn3["requires_confirmation"])
+        self.assertEqual(turn3["pending_action_id"], "")
+        self.assertEqual(turn3["status"], "committed")
+        self.assertTrue(turn3["knowledge_created"])
+        self.assertIn("first payment", turn3["knowledge_created"][0]["canonical_definition"])
+        self.assertEqual(store.search_knowledge("FPU")[0]["name"], "FPU")
+
+    def test_forced_knowledge_write_appends_to_active_session_instead_of_new_one(self):
+        store = self.make_store(
+            llm_client=FakeChatLLM(
+                plans=[
+                    {"action": "propose_teaching", "answer": "Bạn nhắn ok để mình lưu nhé.", "confidence": 0.9},
+                    {"action": "answer_direct", "answer": "Mình hiểu rồi.", "confidence": 0.9},
+                ]
+            )
+        )
+        store.chat(message="lưu định nghĩa XYZ", user_id="quynh", session_id="forced-append")
+        store.chat(message="ok", user_id="quynh", session_id="forced-append")
+        active_before = store._load_chat_session("forced-append")["active_teaching_session_id"]
+        self.assertTrue(active_before)
+
+        messages_before = len(store._get_teaching_session(active_before)["messages"])
+
+        # Cau co tu khoa luu nhung planner lai chon answer_direct -> forced shortcut.
+        # Vi dang co session active, phai BO SUNG vao session do, khong tao/de xuat session moi.
+        turn3 = store.chat(message="lưu lại định nghĩa XYZ giúp tôi", user_id="quynh", session_id="forced-append")
+        self.assertNotEqual(turn3["pending_action_type"], "start_teaching")
+
+        sessions = store._load_teaching_sessions()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        active_after = store._load_chat_session("forced-append")["active_teaching_session_id"]
+        self.assertEqual(active_after, active_before)
+        # Noi dung phai duoc append thang vao session dang soan (truoc fix: chi de xuat start moi).
+        messages_after = len(store._get_teaching_session(active_before)["messages"])
+        self.assertEqual(messages_after, messages_before + 1)
+
+
 if __name__ == "__main__":
     unittest.main()
