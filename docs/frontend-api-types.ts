@@ -4,6 +4,7 @@ export type AgentAction =
   | "storage_status"
   | "list_chat_sessions"
   | "get_chat_history"
+  | "query_data"
   | string;
 
 export interface AgentApiError {
@@ -55,6 +56,9 @@ export type ChatStatus =
   | "needs_knowledge"
   | "needs_example"
   | "sql_draft"
+  | "query_result"
+  | "query_error"
+  | "sql_only"
   | "awaiting_confirmation"
   | "committed"
   | "pending_approval"
@@ -172,10 +176,20 @@ export interface ChatResult {
   used_dictionary_ids: string[];
   /** Approved question example ids used by backend. Optional source panel/debug. */
   used_example_ids: string[];
-  /** SQL draft. Show only when status === "sql_draft" and sql is non-empty. */
+  /** SQL. Show when status is sql_draft/query_result/query_error/sql_only and sql is non-empty. */
   sql?: string | null;
   /** Optional SQL/result explanation. */
   explanation?: string | string[];
+  /** Result column names, in order (status === "query_result"). */
+  columns?: string[];
+  /** Result rows as column→value objects, JSON-safe (status === "query_result"). */
+  rows?: Record<string, unknown>[];
+  /** Number of returned rows (after row-limit cap). */
+  row_count?: number;
+  /** True if result was capped by DATA_QUERY_MAX_ROWS. */
+  truncated?: boolean;
+  /** Why the query failed or was not executed (status query_error/sql_only). Show with SQL; never fabricate results. */
+  query_error?: string;
   /** Dev diagnostics only. Do not render by default. */
   debug?: DebugContext;
   /** Allows backend to add source arrays when debug_context=true. */

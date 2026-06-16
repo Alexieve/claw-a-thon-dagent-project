@@ -62,6 +62,23 @@ DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=require
 
 Khi `DATABASE_URL` tồn tại, agent tự chạy migration trong `db/schema.sql` lúc boot và dùng Postgres cho KB, pending change, teaching session, raw event, document chunk.
 
+### Air-data warehouse (NEW_DATABASE_URL)
+
+`DATABASE_URL` chỉ chứa **metadata** (knowledge/dictionary/examples). Để agent có thể **chạy SQL và trả về số liệu thật**, dữ liệu air được nạp vào một Postgres riêng qua `NEW_DATABASE_URL`:
+
+```bash
+NEW_DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/postgres?sslmode=require
+```
+
+Nạp `zalopay/payment_air.csv` và `zalopay/search_air.csv` thành 2 bảng `payment_air` / `search_air` (dùng `COPY`, xử lý được file 1.6M dòng):
+
+```bash
+python scripts/load_air_data.py --dry-run     # xem trước số dòng
+python scripts/load_air_data.py --recreate    # DROP + tạo lại + nạp
+```
+
+Schema warehouse ở `db/warehouse_schema.sql` (nguồn sự thật: `agent_core/data_warehouse.py:WAREHOUSE_TABLES`). Khi `NEW_DATABASE_URL` rỗng, agent vẫn sinh SQL nhưng không execute. Giới hạn truy vấn chỉnh qua `DATA_QUERY_MAX_ROWS` (mặc định 1000) và `DATA_QUERY_TIMEOUT_MS` (mặc định 15000). Mọi câu SQL do agent sinh chỉ chạy read-only (chỉ `SELECT`/`WITH`, transaction READ ONLY + statement_timeout + rollback).
+
 Chat context mặc định chạy `auto`: nếu có `CHAT_CONTEXT_MEMORY_ID` thì dùng AgentBase Memory events, nếu chưa có thì fallback local để dễ test Postman.
 
 ```bash
@@ -344,7 +361,20 @@ curl -X POST http://127.0.0.1:8080/invocations \
   }'
 ```
 
-Khi chưa có đủ mapping bảng/cột, response sẽ là `needs_dictionary` hoặc `needs_knowledge` kèm danh sách context còn thiếu. Khi đủ Domain Knowledge và Data Dictionary, agent trả `sql_draft`. Nếu có Question Example phù hợp, SQL draft ưu tiên dùng example đã approved.
+Khi chưa có đủ mapping bảng/cột, response sẽ là `needs_dictionary` hoặc `needs_knowledge` kèm danh sách context còn thiếu. Khi đủ Domain Knowledge và Data Dictionary, agent trả `sql_draft`. Nếu có Question Example phù hợp, SQL draft ưu tiên dùng example đã approved. `ask_data_question` chỉ **sinh SQL draft**, không chạy.
+
+Flow B2 - sinh SQL **và chạy** trên warehouse (`query_data`):
+
+```bash
+curl -X POST http://127.0.0.1:8080/invocations \
+  -H "Content-Type: application/json" \
+  -d '{
+    "action": "query_data",
+    "question": "Mỗi ngày trong tháng 1/2026 có bao nhiêu người tìm vé?"
+  }'
+```
+
+Agent dùng knowledge/dictionary/examples (từ `DATABASE_URL`) để sinh SQL **Postgres**, chạy read-only trên `NEW_DATABASE_URL`, rồi trả về `sql` + `columns` + `rows` + `row_count` (status `query_result`). Nếu SQL chạy lỗi, agent thử sửa một lần rồi trả `query_error` kèm SQL (không bịa kết quả). Luồng chat cũng tự chạy SQL sau khi user confirm câu hỏi data.
 
 Thêm Data Dictionary:
 

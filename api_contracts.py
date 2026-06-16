@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Callable, Protocol
 
 
-PUBLIC_FE_ACTIONS = {"chat", "search_knowledge", "storage_status", "list_chat_sessions", "get_chat_history"}
+PUBLIC_FE_ACTIONS = {"chat", "search_knowledge", "storage_status", "list_chat_sessions", "get_chat_history", "query_data"}
 
 
 class RequestContextLike(Protocol):
@@ -81,6 +81,7 @@ class AgentApiRouter:
         self._register("list_candidates", "Liet ke candidate theo status.", False, self._list_candidates)
         self._register("search_knowledge", "Tim approved knowledge.", True, self._search_knowledge)
         self._register("ask_data_question", "Hoi cau hoi data va sinh missing context hoac SQL draft.", False, self._ask_data_question)
+        self._register("query_data", "Sinh SQL Postgres, chay tren NEW_DATABASE_URL, tra ve SQL + ket qua query.", True, self._query_data)
         self._register("add_data_dictionary", "Them mapping bang/cot da approved.", False, self._add_data_dictionary)
         self._register("search_data_dictionary", "Tim mapping bang/cot.", False, self._search_data_dictionary)
         self._register("list_data_dictionary", "Liet ke data dictionary da luu.", False, self._list_data_dictionary)
@@ -194,6 +195,9 @@ class AgentApiRouter:
 
     def _ask_data_question(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
         return self.store.ask_data_question(question=self._text(payload.get("question") or payload.get("message")))
+
+    def _query_data(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
+        return self.store.run_data_query(question=self._text(payload.get("question") or payload.get("message")))
 
     def _add_data_dictionary(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
         columns = payload.get("columns")
@@ -327,6 +331,13 @@ def normalize_chat_result(result: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("used_knowledge_ids", [])
     normalized.setdefault("used_dictionary_ids", [])
     normalized.setdefault("used_example_ids", [])
+    # Data-query execution fields (action chat khi confirm data_query, hoac action query_data).
+    normalized.setdefault("sql", "")
+    normalized.setdefault("columns", [])
+    normalized.setdefault("rows", [])
+    normalized.setdefault("row_count", 0)
+    normalized.setdefault("truncated", False)
+    normalized.setdefault("query_error", "")
     normalized.setdefault("debug", {})
 
     pending_action_id = str(normalized.get("pending_action_id") or "")

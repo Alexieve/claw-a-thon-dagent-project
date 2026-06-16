@@ -24,6 +24,12 @@ from agent_core.constants import (
     RAW_EVENTS_PATH,
     TEACHING_SESSIONS_PATH,
 )
+from agent_core.data_warehouse import (
+    DataWarehouse,
+    validate_readonly_select,
+    warehouse_schema_summary,
+    DATA_COVERAGE,
+)
 from agent_core.llm import AgentLLMClient
 from agent_core.memory import AgentBaseMemoryEventStore, LocalChatSessionEventStore, MemoryClient, SessionContextStoreError
 from agent_core.parser import KnowledgeParser
@@ -64,6 +70,8 @@ class KnowledgeStore:
         data_dictionary_path: Path | str = DATA_DICTIONARY_PATH,
         question_examples_path: Path | str = QUESTION_EXAMPLES_PATH,
         database_url: str | None = None,
+        new_database_url: str | None = None,
+        data_warehouse: Any | None = None,
         parser: KnowledgeParser | None = None,
         llm_client: Any | None = None,
         chat_context_backend: str | None = None,
@@ -85,6 +93,22 @@ class KnowledgeStore:
         self.question_examples_path = Path(question_examples_path)
         self.database_url = normalize_text(database_url if database_url is not None else os.getenv("DATABASE_URL"))
         self.db = PostgresStorage(self.database_url) if self.database_url else None
+        # Air-data warehouse (DB mới): nơi CHẠY SQL do agent sinh ra. Tách khỏi DB metadata
+        # ở trên. Cho phép inject (test) qua tham số data_warehouse; mặc định dựng từ
+        # NEW_DATABASE_URL nếu có. None -> chỉ sinh SQL chứ không execute.
+        self.new_database_url = normalize_text(
+            new_database_url if new_database_url is not None else os.getenv("NEW_DATABASE_URL")
+        )
+        if data_warehouse is not None:
+            self.data_warehouse = data_warehouse
+        elif self.new_database_url:
+            try:
+                self.data_warehouse = DataWarehouse(self.new_database_url)
+            except Exception as exc:  # psycopg thiếu / DSN lỗi -> degrade, vẫn sinh được SQL
+                print(f"[startup] data warehouse init warning: {exc}", flush=True)
+                self.data_warehouse = None
+        else:
+            self.data_warehouse = None
         # In-memory cache cho reference data ít thay đổi (knowledge_base, data_dictionary,
         # question_examples). Tránh load lại từ DB remote 3-4 lần mỗi request. Trả về deep-copy
         # nên caller có thể mutate an toàn; invalidate trong _save_json sau mỗi lần ghi.
@@ -865,6 +889,282 @@ class KnowledgeStore:
             ],
             "answer": "Tôi đã có data dictionary liên quan, nhưng cần question example hoặc LLM SQL generator trước khi sinh SQL an toàn.",
         }
+
+    def run_data_query(self, question: str, *, conversation_text: str = "") -> dict[str, Any]:
+        """Sinh SQL Postgres từ knowledge/dictionary/examples (DB cũ), CHẠY trên air-data DB
+        (NEW_DATABASE_URL) và trả về cả câu SQL lẫn kết quả query.
+
+        conversation_text: ngữ cảnh hội thoại gần đây — giúp resolve follow-up mơ hồ
+        ("tất cả góc nhìn đi", "phân tích sâu hơn") thành câu hỏi data cụ thể.
+
+        Status: needs_knowledge / needs_dictionary (chưa execute), query_result (chạy OK),
+        query_error (SQL chạy lỗi), sql_only (sinh được SQL nhưng chưa/không execute được).
+        """
+        cleaned = normalize_text(question)
+        if not cleaned:
+            raise ValueError("Thiếu câu hỏi nghiệp vụ")
+        conversation_text = normalize_text(conversation_text)
+
+        analysis = self.analyze_text(cleaned)
+        known = analysis["known"]
+        detected_concepts = unique_values([*analysis["detected_terms"], *self._extract_question_terms(cleaned)])
+        missing_knowledge = analysis["unknown"]
+        dictionary_matches = self._search_dictionary_for_question(cleaned, known)
+        example_matches = self._filter_question_examples_for_known_concepts(
+            self.search_question_examples(cleaned), known
+        )
+        # Follow-up mơ hồ (vd "tất cả góc nhìn đi") không match bảng nào -> retrieve lại bằng
+        # ngữ cảnh hội thoại để vẫn tìm được dictionary/knowledge của câu hỏi data trước đó.
+        if not dictionary_matches and conversation_text:
+            enriched = f"{conversation_text} {cleaned}"
+            ctx_analysis = self.analyze_text(enriched)
+            if not known and ctx_analysis["known"]:
+                known = ctx_analysis["known"]
+                missing_knowledge = []
+            dictionary_matches = self._search_dictionary_for_question(enriched, known)
+            if not example_matches:
+                example_matches = self._filter_question_examples_for_known_concepts(
+                    self.search_question_examples(enriched), known
+                )
+
+        result: dict[str, Any] = {
+            "question": cleaned,
+            "detected_concepts": detected_concepts,
+            "known_knowledge": known,
+            "knowledge": known,
+            "dictionary": dictionary_matches,
+            "examples": example_matches,
+            "used_knowledge_ids": [item["id"] for item in known],
+            "used_dictionary_ids": [item["id"] for item in dictionary_matches],
+            "used_example_ids": [],
+            "sql": "",
+            "columns": [],
+            "rows": [],
+            "row_count": 0,
+            "truncated": False,
+            "query_error": "",
+            "explanation": [],
+            "missing": [],
+        }
+
+        if missing_knowledge:
+            result["status"] = "needs_knowledge"
+            result["missing"] = [
+                {
+                    "type": "domain_knowledge",
+                    "concept": concept,
+                    "question": f"{concept} nghĩa là gì trong nghiệp vụ?",
+                }
+                for concept in missing_knowledge
+            ]
+            result["answer"] = self._synthesize_data_answer(cleaned, result)
+            return result
+
+        # Execution path: chỉ block khi KHÔNG có bảng nào trong dictionary khớp (thiếu context bảng).
+        # Khi đã match ít nhất một bảng, để LLM map cột dựa trên warehouse schema + dictionary
+        # (không hard-gate theo từng concept như ask_data_question, tránh chặn câu hỏi hợp lệ).
+        if not dictionary_matches:
+            result["status"] = "needs_dictionary"
+            result["missing"] = self._build_missing_dictionary_items(
+                cleaned, known, detected_concepts, dictionary_matches
+            ) or [{"type": "table_mapping", "concept": cleaned, "question": "Câu hỏi này lấy dữ liệu từ bảng/cột nào?"}]
+            result["answer"] = self._synthesize_data_answer(cleaned, result)
+            return result
+
+        built = self._build_executable_sql(
+            cleaned, known, dictionary_matches, example_matches, conversation_text=conversation_text
+        )
+        if not built or not built.get("sql"):
+            # Không sinh được SQL Postgres chạy được -> trả SQL draft (có thể Presto) làm tham khảo.
+            draft = self._build_draft_sql_fallback(
+                cleaned, known, dictionary_matches, example_matches, detected_concepts
+            )
+            result["sql"] = draft.get("sql", "")
+            result["explanation"] = draft.get("explanation", [])
+            result["used_example_ids"] = draft.get("used_example_ids", [])
+            result["status"] = "sql_only"
+            result["query_error"] = (
+                "Chưa sinh được SQL Postgres chạy tự động; đây là SQL draft để tham khảo (có thể là dialect Presto)."
+            )
+            result["answer"] = self._synthesize_data_answer(cleaned, result)
+            return result
+
+        result["sql"] = built["sql"]
+        result["explanation"] = built.get("explanation", [])
+        result["used_example_ids"] = [item["id"] for item in example_matches] if example_matches else []
+
+        if self.data_warehouse is None:
+            result["status"] = "sql_only"
+            result["query_error"] = "NEW_DATABASE_URL chưa cấu hình nên chưa chạy được SQL."
+            result["answer"] = self._synthesize_data_answer(cleaned, result)
+            return result
+
+        execution = self.data_warehouse.execute_readonly(result["sql"])
+        if not execution.get("ok"):
+            # Một vòng repair: gửi SQL hỏng + lỗi Postgres cho LLM sửa rồi chạy lại.
+            repaired = self._repair_executable_sql(
+                cleaned, known, dictionary_matches, result["sql"], execution.get("error", "")
+            )
+            if repaired and repaired.get("sql") and repaired["sql"] != result["sql"]:
+                retry = self.data_warehouse.execute_readonly(repaired["sql"])
+                result["sql"] = repaired["sql"]
+                if repaired.get("explanation"):
+                    result["explanation"] = repaired["explanation"]
+                execution = retry
+
+        if execution.get("ok"):
+            result["status"] = "query_result"
+            result["columns"] = execution["columns"]
+            result["rows"] = execution["rows"]
+            result["row_count"] = execution["row_count"]
+            result["truncated"] = execution["truncated"]
+        else:
+            result["status"] = "query_error"
+            result["query_error"] = execution.get("error", "Query thất bại.")
+        result["answer"] = self._synthesize_data_answer(cleaned, result)
+        return result
+
+    def _build_executable_sql(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+        dictionary: list[dict[str, Any]],
+        examples: list[dict[str, Any]],
+        *,
+        conversation_text: str = "",
+    ) -> dict[str, Any]:
+        """Sinh MỘT câu SELECT Postgres chạy được. Examples (Presto) chỉ làm few-shot."""
+        if not self._llm_configured():
+            return {}
+        max_rows = self.data_warehouse.max_rows if self.data_warehouse else int(os.getenv("DATA_QUERY_MAX_ROWS") or "1000")
+        compact = {
+            "question": question,
+            "postgres_schema": warehouse_schema_summary(),
+            "data_coverage": DATA_COVERAGE,
+            "knowledge": [self._compact_knowledge(item) for item in known],
+            "dictionary": [self._compact_dictionary(item) for item in dictionary],
+            "reference_examples_presto": [
+                {"question": item.get("question", ""), "sql": (item.get("sql", "") or "")[:1200]}
+                for item in examples[:3]
+            ],
+        }
+        if normalize_text(conversation_text):
+            compact["conversation_context"] = normalize_text(conversation_text)[:2500]
+        system = (
+            "You generate exactly ONE runnable PostgreSQL SELECT query for a Vietnamese business data question. "
+            "Return only JSON with fields: sql, explanation, answer.\n"
+            "Rules:\n"
+            "- If `question` is a short context-dependent follow-up (e.g. 'phân tích sâu hơn', 'tất cả góc nhìn', 'theo provider'), "
+            "RESOLVE it using `conversation_context` (the prior turns) into a concrete self-contained query — reuse the prior filters, "
+            "time range, routes/entities, and metrics mentioned there. Pick the single most useful breakdown if several are implied.\n"
+            "- Target PostgreSQL, NOT Presto/Trino. reference_examples_presto are Presto — translate idioms: "
+            "date_diff('day',a,b) -> (b::date - a::date); approx_percentile(x,p) -> percentile_cont(p) WITHIN GROUP (ORDER BY x); "
+            "format_datetime(c,'EEEE') -> to_char(c,'FMDay'); INTERVAL '7' DAY -> INTERVAL '7 day'; CAST(x AS DOUBLE) -> CAST(x AS double precision).\n"
+            "- Use ONLY the tables/columns in postgres_schema. All identifiers are lowercase and UNQUOTED — never quote identifiers, never use camelCase (write reqdate, userid, transid).\n"
+            "- Directly runnable: use CONCRETE date literals (DATE 'YYYY-MM-DD'); NEVER use {{ }} template params. If the question implies a period but gives no exact dates, choose dates inside data_coverage.\n"
+            "- Timestamp columns use a half-open range: col >= DATE 'start' AND col < DATE 'end'.\n"
+            "- The ONLY join between the two tables is search_air.user_id = payment_air.userid. Do NOT add extra equality "
+            "conditions on route/date/trip_type to the JOIN (they are not valid join keys and will return 0 rows). "
+            "payment_air.round_type has mixed casing -> use upper(round_type).\n"
+            f"- Always add ORDER BY and LIMIT (<= {max_rows}) unless it is a single-row aggregate.\n"
+            "- Exactly ONE SELECT or WITH statement. No DDL/DML, no extra semicolons.\n"
+            "If you cannot build a safe query from postgres_schema, return an empty sql string."
+        )
+        parsed = self.llm_client.complete_json(
+            system=system,
+            user=json.dumps(compact, ensure_ascii=False),
+            temperature=0,
+        )
+        return self._finalize_generated_sql(
+            parsed, dictionary, default_expl="SQL Postgres do LLM sinh từ schema + Data Dictionary đã retrieve."
+        )
+
+    def _repair_executable_sql(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+        dictionary: list[dict[str, Any]],
+        failed_sql: str,
+        error: str,
+    ) -> dict[str, Any]:
+        if not self._llm_configured() or not failed_sql:
+            return {}
+        compact = {
+            "question": question,
+            "postgres_schema": warehouse_schema_summary(),
+            "failed_sql": failed_sql,
+            "postgres_error": error,
+            "dictionary": [self._compact_dictionary(item) for item in dictionary],
+        }
+        system = (
+            "A PostgreSQL SELECT query failed. Fix it and return only JSON with fields: sql, explanation. "
+            "Keep exactly ONE runnable SELECT/WITH statement using ONLY the tables/columns in postgres_schema, "
+            "lowercase unquoted identifiers, concrete date literals (no template params), no DDL/DML, no extra semicolons. "
+            "Address the postgres_error directly."
+        )
+        parsed = self.llm_client.complete_json(
+            system=system,
+            user=json.dumps(compact, ensure_ascii=False),
+            temperature=0,
+        )
+        return self._finalize_generated_sql(parsed, dictionary, default_expl="SQL Postgres đã sửa sau lỗi execute.")
+
+    def _finalize_generated_sql(
+        self,
+        parsed: Any,
+        dictionary: list[dict[str, Any]],
+        *,
+        default_expl: str,
+    ) -> dict[str, Any]:
+        """Validate SQL do LLM sinh: chỉ một câu đọc + tham chiếu ít nhất một bảng đã retrieve.
+        Giữ nguyên định dạng nhiều dòng (không collapse whitespace) để comment dòng không phá câu."""
+        if not isinstance(parsed, dict):
+            return {}
+        sql = str(parsed.get("sql") or "").strip()
+        if not sql:
+            return {}
+        ok, _reason = validate_readonly_select(sql)
+        if not ok:
+            return {}
+        allowed_tables = {normalize_lookup(item.get("table")) for item in dictionary}
+        allowed_tables.discard("")
+        if allowed_tables and not any(table in normalize_lookup(sql) for table in allowed_tables):
+            return {}
+        explanation = parsed.get("explanation")
+        if isinstance(explanation, str):
+            explanation = [explanation]
+        if not isinstance(explanation, list):
+            explanation = [default_expl]
+        cleaned_expl = [normalize_text(item) for item in explanation if normalize_text(item)]
+        return {
+            "sql": sql,
+            "explanation": cleaned_expl or [default_expl],
+            "answer": normalize_text(parsed.get("answer")),
+        }
+
+    def _build_draft_sql_fallback(
+        self,
+        question: str,
+        known: list[dict[str, Any]],
+        dictionary: list[dict[str, Any]],
+        examples: list[dict[str, Any]],
+        detected_concepts: list[str],
+    ) -> dict[str, Any]:
+        """SQL draft tham khảo (theo precedence của ask_data_question) khi không sinh được SQL Postgres."""
+        if examples:
+            example = examples[0]
+            return {
+                "sql": example.get("sql", ""),
+                "explanation": self._build_sql_explanation(known, dictionary, example),
+                "used_example_ids": [example["id"]],
+            }
+        llm_sql = self._build_llm_sql_draft(question, known, dictionary)
+        if llm_sql:
+            return {"sql": llm_sql["sql"], "explanation": llm_sql.get("explanation", []), "used_example_ids": []}
+        sql = self._build_deterministic_sql_draft(question, known, dictionary, detected_concepts)
+        if sql:
+            return {"sql": sql, "explanation": self._build_sql_explanation(known, dictionary, {}), "used_example_ids": []}
+        return {"sql": "", "explanation": [], "used_example_ids": []}
 
     def analyze_text(self, text: str) -> dict[str, Any]:
         cleaned = normalize_text(text)
@@ -2452,7 +2752,9 @@ class KnowledgeStore:
             return previous
         if self._looks_like_data_query_refinement(addition):
             return f"{previous}. Bổ sung: {addition}"
-        return addition
+        # Reply mơ hồ (vd "vậy là được rồi") KHÔNG mang thông tin truy vấn -> giữ nguyên câu hỏi
+        # gốc thay vì ghi đè (tránh mất câu hỏi gốc khiến query chạy trên message vô nghĩa).
+        return previous
 
     def _looks_like_data_query_refinement(self, message: str) -> bool:
         lowered = normalize_lookup(message)
@@ -2559,6 +2861,31 @@ class KnowledgeStore:
         vague_number_markers = ["mot vai so", "một vài số", "vai so", "vài số", "some numbers"]
         return not any(marker in lowered_message for marker in vague_number_markers)
 
+    def _recent_user_text(self, chat_session: dict[str, Any], *, limit: int = 5) -> str:
+        """Gộp vài lượt user gần nhất để gate clarification có context (không hỏi lại thông tin
+        đã nêu ở lượt trước)."""
+        messages = chat_session.get("messages", [])
+        if not isinstance(messages, list):
+            return ""
+        users = [normalize_text(m.get("content")) for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+        users = [u for u in users if u]
+        return " ".join(users[-limit:])
+
+    def _recent_chat_text(self, chat_session: dict[str, Any], *, limit: int = 6, per_msg: int = 500) -> str:
+        """Gộp vài lượt gần nhất (cả user lẫn assistant) làm ngữ cảnh resolve follow-up data query."""
+        messages = chat_session.get("messages", [])
+        if not isinstance(messages, list):
+            return ""
+        parts: list[str] = []
+        for m in messages[-limit:]:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role")
+            content = normalize_text(m.get("content"))
+            if role in {"user", "assistant"} and content:
+                parts.append(f"{role}: {content[:per_msg]}")
+        return "\n".join(parts)
+
     def _confirm_chat_action(self, *, chat_session: dict[str, Any], action: dict[str, Any], message: str) -> dict[str, Any]:
         action_type = action.get("type", "")
         payload = action.get("payload", {}) if isinstance(action.get("payload"), dict) else {}
@@ -2623,14 +2950,27 @@ class KnowledgeStore:
                 )
 
         if action_type == "data_query":
-            result = self.ask_data_question(payload.get("message", ""))
+            # Chạy trên câu hỏi đã resolve (giữ refinement), fallback về raw_message gốc —
+            # KHÔNG dùng payload["message"] vì có thể bị reply xác nhận mơ hồ ghi đè.
+            data_question = normalize_text(
+                payload.get("resolved_message") or payload.get("raw_message") or payload.get("message")
+            )
+            # Truyền ngữ cảnh hội thoại gần đây để resolve follow-up mơ hồ ("tất cả góc nhìn đi").
+            result = self.run_data_query(
+                data_question, conversation_text=self._recent_chat_text(chat_session)
+            )
             action["status"] = "done"
             response = {
                 "status": result.get("status", "answered"),
                 "intent": "data_sql",
-                "answer": self._synthesize_data_answer(payload.get("message", ""), result),
+                "answer": result.get("answer") or self._synthesize_data_answer(payload.get("message", ""), result),
                 "question": payload.get("message", ""),
                 "sql": result.get("sql"),
+                "columns": result.get("columns", []),
+                "rows": result.get("rows", []),
+                "row_count": result.get("row_count", 0),
+                "truncated": result.get("truncated", False),
+                "query_error": result.get("query_error", ""),
                 "missing": result.get("missing", []),
                 "used_knowledge_ids": result.get("used_knowledge_ids")
                 or [item["id"] for item in result.get("known_knowledge", result.get("knowledge", []))],
@@ -2642,8 +2982,9 @@ class KnowledgeStore:
                 "debug": {
                     "llm_used": self._llm_configured(),
                     "fallback_used": not self._llm_configured(),
-                    "skip_answer_synthesis": result.get("status") in {"needs_dictionary", "needs_knowledge"},
-                    "answer_synthesis_skip_reason": "deterministic_data_gap",
+                    # run_data_query đã tự synthesize answer (kèm rows) -> không cần synthesis lần 2.
+                    "skip_answer_synthesis": True,
+                    "answer_synthesis_skip_reason": "data_answer_synthesized",
                 },
             }
             return self._finalize_chat_response(response, chat_session=chat_session, requires_confirmation=False)
@@ -2800,6 +3141,11 @@ class KnowledgeStore:
     ) -> dict[str, Any]:
         conversation_context = conversation_context or {}
         clarification_items = self._data_query_clarification_items(message)
+        if clarification_items:
+            # Context-aware: nếu các lượt user gần đây đã cung cấp đủ thời gian/kiểu output thì
+            # KHÔNG hỏi lại (tránh vòng lặp clarify khi user chỉ trả lời ngắn/đồng ý ở lượt sau).
+            combined = f"{self._recent_user_text(chat_session)} {message}"
+            clarification_items = self._data_query_clarification_items(combined)
         if clarification_items:
             prefix = (normalize_text(planner_answer) + " ") if normalize_text(planner_answer) else ""
             debug = planner_debug or {"llm_used": llm_used, "fallback_used": not llm_used}
@@ -3308,6 +3654,14 @@ class KnowledgeStore:
             "save it", "save di", "go ahead", "proceed", "đồng ý nhé", "dong y nhe",
             "xác nhận", "xac nhan", "đồng ý", "dong y", "chốt luôn", "chot luon",
             "lưu luôn", "luu luon", "lưu đi", "luu di", "ừ lưu", "u luu",
+            # Câu chấp nhận / yêu cầu chạy data (xác nhận pending data_query, tránh vòng lặp refine).
+            "được rồi", "duoc roi", "vậy là được", "vay la duoc", "vậy được", "vay duoc",
+            "thế là được", "the la duoc", "ổn rồi", "on roi", "ok rồi", "ok roi",
+            "lấy data", "lay data", "lấy số liệu", "lay so lieu", "lấy dữ liệu", "lay du lieu",
+            "lấy giúp", "lay giup", "lấy giùm", "lay gium", "lấy dùm", "lay dum",
+            "lấy luôn", "lay luon", "lấy đi", "lay di", "lên data", "len data",
+            "xuất data", "xuat data", "chạy query", "chay query", "chạy đi", "chay di",
+            "chạy luôn", "chay luon", "chạy giúp", "chay giup",
         ]
         if any(marker in lowered for marker in confirm_markers):
             return True
@@ -3598,6 +3952,11 @@ class KnowledgeStore:
                 "question": data_result.get("question"),
                 "sql": data_result.get("sql"),
                 "missing": data_result.get("missing", []),
+                "row_count": data_result.get("row_count", 0),
+                "rows_sample": data_result.get("rows", [])[:10],
+                "columns": data_result.get("columns", []),
+                "truncated": data_result.get("truncated", False),
+                "query_error": data_result.get("query_error", ""),
                 "knowledge": [self._compact_knowledge(item) for item in data_result.get("known_knowledge", data_result.get("knowledge", []))],
                 "dictionary": [self._compact_dictionary(item) for item in data_result.get("dictionary", [])],
                 "examples": [self._compact_example(item) for item in data_result.get("examples", [])],
@@ -3606,7 +3965,10 @@ class KnowledgeStore:
             system = (
                 "You explain data-question results in natural Vietnamese. Use only the provided result. "
                 "If status is needs_dictionary or needs_knowledge, clearly say what is missing. "
-                "If SQL exists, explain it is a draft and mention key assumptions. "
+                "If status is query_result, summarize the RESULT: state row_count, highlight notable values from rows_sample, "
+                "mention if truncated, and show the SQL that was run. Do NOT invent numbers beyond rows_sample/row_count. "
+                "If status is query_error, say the query failed with query_error and show the SQL so the user can review — do not fabricate results. "
+                "If status is sql_only, say the SQL was generated but not executed (query_error explains why) and show it. "
                 "Format your reply using Markdown: use **bold** for key terms and metric names, bullet lists (- item) for enumerations, and fenced code blocks (``` sql ... ```) for any SQL snippets."
             )
             answer = self.llm_client.complete_text(
@@ -3620,6 +3982,19 @@ class KnowledgeStore:
 
     def _synthesize_data_answer_deterministic(self, data_result: dict[str, Any]) -> str:
         status = data_result.get("status")
+        if status == "query_result":
+            rc = data_result.get("row_count", 0)
+            note = " (đã cắt bớt theo giới hạn dòng)" if data_result.get("truncated") else ""
+            return f"Đã chạy SQL trên database và nhận về {rc} dòng{note}. Xem SQL và kết quả bên dưới."
+        if status == "query_error":
+            return (
+                f"Mình đã sinh SQL nhưng chạy bị lỗi: {data_result.get('query_error', '')}. "
+                "Bạn xem lại câu SQL bên dưới nhé."
+            )
+        if status == "sql_only":
+            err = data_result.get("query_error", "")
+            suffix = f": {err}" if err else ""
+            return f"Mình đã sinh SQL (chưa execute{suffix}). Xem SQL bên dưới."
         if status == "sql_draft":
             explanation = " ".join(data_result.get("explanation", [])[:3])
             return f"Mình đã có đủ context để tạo SQL draft. {explanation}".strip()

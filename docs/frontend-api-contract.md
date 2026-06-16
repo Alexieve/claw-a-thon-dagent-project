@@ -77,6 +77,7 @@ if (response.status === "error") {
 | `storage_status` | Có, diagnostics | Kiểm tra backend đang dùng JSON/Postgres/Supabase. |
 | `list_chat_sessions` | Có | Lấy danh sách chat session của một user. |
 | `get_chat_history` | Có | Lấy toàn bộ lịch sử chat theo session_id. |
+| `query_data` | Có | Sinh SQL Postgres từ knowledge/dictionary/examples, chạy trên `NEW_DATABASE_URL` (read-only) và trả về **SQL + kết quả query** trong một lần gọi. |
 
 Các action admin khác không cần dùng trong Chat UI phase này.
 
@@ -183,6 +184,9 @@ type ChatStatus =
   | "needs_knowledge"
   | "needs_example"        // data query confirm: có dictionary nhưng chưa có SQL example/LLM
   | "sql_draft"
+  | "query_result"         // query_data / data_query confirm: đã CHẠY SQL, có rows + columns
+  | "query_error"          // sinh được SQL nhưng chạy lỗi (xem query_error); KHÔNG có rows
+  | "sql_only"             // sinh được SQL nhưng chưa execute (vd NEW_DATABASE_URL chưa cấu hình)
   | "awaiting_confirmation"
   | "committed"
   | "pending_approval"     // teaching commit: term đã tồn tại, tạo change request chờ duyệt
@@ -239,6 +243,12 @@ interface ChatResult {
   used_example_ids: string[];
   sql?: string | null;
   explanation?: string | string[];
+  // Data-query execution (status query_result/query_error/sql_only; action query_data hoặc confirm data_query):
+  columns?: string[];                 // tên cột theo thứ tự
+  rows?: Record<string, unknown>[];   // mỗi row là object cột→giá trị (đã JSON-safe)
+  row_count?: number;                 // số dòng trả về (sau khi cắt theo giới hạn)
+  truncated?: boolean;                // true nếu kết quả bị cắt theo DATA_QUERY_MAX_ROWS
+  query_error?: string;               // lý do lỗi/không execute; rỗng khi query_result OK
   debug?: DebugContext;
   [key: string]: unknown;
 }
@@ -267,8 +277,13 @@ Field dictionary cho FE:
 | `used_knowledge_ids` | Optional | Id knowledge đã dùng. Dùng cho source panel/debug. |
 | `used_dictionary_ids` | Optional | Id data dictionary đã dùng. Dùng cho source panel/debug. |
 | `used_example_ids` | Optional | Id SQL/question examples đã dùng. Dùng cho source panel/debug. |
-| `sql` | Có khi có | SQL draft. Chỉ show khi `status === "sql_draft"` và `sql` có value. |
+| `sql` | Có khi có | SQL. Show khi `status` ∈ `sql_draft`/`query_result`/`query_error`/`sql_only` và `sql` có value. |
 | `explanation` | Optional | Giải thích SQL hoặc reasoning ngắn. Có thể là string hoặc array tùy action. |
+| `columns` | Có khi `query_result` | Tên cột theo thứ tự, dùng dựng header bảng kết quả. |
+| `rows` | Có khi `query_result` | Mảng object cột→giá trị. Render thành bảng. Giá trị đã JSON-safe (datetime→ISO, Decimal→number). |
+| `row_count` | Có khi query đã chạy | Số dòng trả về. |
+| `truncated` | Optional | `true` nếu kết quả bị cắt theo giới hạn dòng (báo user "hiển thị N dòng đầu"). |
+| `query_error` | Có khi `query_error`/`sql_only` | Lý do query lỗi hoặc chưa execute. Show cùng SQL để user review; **không bịa kết quả**. |
 | `debug` | Không render mặc định | Dành cho dev diagnostics, latency, LLM fallback, memory status. |
 
 ## 7. Status Mapping Cho UI
@@ -281,6 +296,9 @@ Field dictionary cho FE:
 | `needs_dictionary` | Render `answer`, show missing-context cards từ `missing`. Không show SQL. |
 | `needs_knowledge` | Render `answer`, show missing-domain-knowledge cards từ `missing`. Không show SQL. |
 | `sql_draft` | Render `answer`; nếu `sql` có value thì show SQL preview/copy button. |
+| `query_result` | Render `answer`; show SQL (copy) **và** bảng kết quả từ `columns`/`rows`. Nếu `truncated` thì báo "hiển thị N dòng đầu". |
+| `query_error` | Render `answer`; show SQL + `query_error` để user review. Không render bảng (không có rows). |
+| `sql_only` | Render `answer`; show SQL. Báo theo `query_error` rằng SQL chưa được chạy. |
 | `committed` | Render `answer`; có thể show success state. |
 | `pending_approval` | Render `answer`; teaching đã tạo change request vì term đã tồn tại. Show thông báo "chờ owner duyệt". |
 | `needs_example` | Render `answer`; đủ dictionary nhưng backend chưa có SQL example/LLM để sinh SQL. |
