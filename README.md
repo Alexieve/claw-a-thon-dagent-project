@@ -26,3 +26,18 @@ DAGENT giúp Business tự lấy số trong vài giây, loại bỏ độ trễ 
 ## Sơ đồ hệ thống
 
 ![DAGENT - Sơ đồ hệ thống](docs/assets/dagent-system-diagram.png)
+
+## Chức năng chính
+DAGENT có hai chức năng chạy trên cùng một kho định nghĩa chuẩn (single source of truth):
+- **Chức năng 1 — Học định nghĩa mới (chờ phê duyệt)**
+  - Bắt đầu khi biz/user đề xuất một định nghĩa mới (1).
+  - Agent sẽ hỏi lại để làm rõ và chốt nghĩa (2) — nếu chưa đủ rõ thì vòng ngược lại bước 1 (mũi tên "hỏi lại").
+  - Khi đã rõ, định nghĩa được đẩy vào hàng đợi Review (3), rồi tới PIC duyệt (4).
+  - PIC có hai lựa chọn: Reject thì quay lại bước làm rõ, còn Accept thì định nghĩa được ghi vào Kho định nghĩa chuẩn.
+    - Tóm lại: đề xuất → làm rõ → review → duyệt → lưu kho.
+
+- **Chức năng 2 — Dịch request của biz (xuất số)**
+  - Khi biz gửi yêu cầu số liệu (1), agent dịch request đó (2) bằng cách đọc định nghĩa chuẩn từ kho để map ngôn ngữ biz sang đúng định nghĩa đã thống nhất.
+  - Sau khi map xong, hệ thống tự động sinh SQL và query database (3), rồi trả số liệu về cho biz (4).
+  - Ý tưởng cốt lõi: mọi con số xuất ra ở chức năng 2 đều dựa trên định nghĩa đã được duyệt ở chức năng 1 — nên cùng một khái niệm luôn được hiểu và tính nhất quán, không mỗi người một kiểu.
+  - Nền tảng chạy trên GreenNode AgentBase: LLM hiểu hội thoại, sinh SQL, kết nối DB, lấy kho định nghĩa đã duyệt làm tri thức tham chiếu.
