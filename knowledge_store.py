@@ -309,13 +309,15 @@ class KnowledgeStore:
             )
             for candidate in candidates
         ]
-        knowledge_created = [item["knowledge"] for item in processed if item.get("result") == "created"]
-        change_requests = [item["candidate"] for item in processed if item.get("result") == "pending_change"]
+        # Moi dinh nghia (moi lan dau hoac thay doi) deu vao hang cho duyet -> khong con
+        # knowledge_created tu luong day; gom tat ca candidate dang cho vao "candidates".
+        pending = [item["candidate"] for item in processed if item.get("candidate")]
+        change_requests = [item for item in pending if item.get("status") == "pending_change"]
         return {
             "raw_event": event,
-            "knowledge_created": knowledge_created,
+            "knowledge_created": [],
             "change_requests": change_requests,
-            "candidates": change_requests,
+            "candidates": pending,
         }
 
     def ingest_document(
@@ -333,7 +335,7 @@ class KnowledgeStore:
             raise ValueError("Thiếu nội dung file")
         document_id = new_id("doc")
         chunks = []
-        all_knowledge_created: list[dict[str, Any]] = []
+        all_candidates: list[dict[str, Any]] = []
         all_change_requests: list[dict[str, Any]] = []
         for index, chunk in enumerate(chunk_text(cleaned)):
             chunk_record = {
@@ -358,15 +360,15 @@ class KnowledgeStore:
                 source_type="document",
                 document_id=document_id,
             )
-            all_knowledge_created.extend(taught["knowledge_created"])
+            all_candidates.extend(taught["candidates"])
             all_change_requests.extend(taught["change_requests"])
 
         return {
             "document_id": document_id,
             "chunks": chunks,
-            "knowledge_created": all_knowledge_created,
+            "knowledge_created": [],
             "change_requests": all_change_requests,
-            "candidates": all_change_requests,
+            "candidates": all_candidates,
         }
 
     def start_teach_session(
@@ -464,19 +466,22 @@ class KnowledgeStore:
             proposed_by=session.get("owner") or session.get("stakeholder", ""),
             source_event_id=event["id"],
         )
-        knowledge_created = [processed["knowledge"]] if processed.get("result") == "created" else []
-        change_requests = [processed["candidate"]] if processed.get("result") == "pending_change" else []
-        session["status"] = "pending_approval" if change_requests else "committed"
+        # Moi dinh nghia (moi hoac thay doi) deu cho duyet -> session luon o pending_approval.
+        candidate = processed.get("candidate")
+        candidates = [candidate] if candidate else []
+        change_requests = [candidate] if processed.get("result") == "pending_change" else []
+        session["status"] = "pending_approval" if candidates else "committed"
         session["raw_event_id"] = event["id"]
-        session["knowledge_created_ids"] = [item["id"] for item in knowledge_created]
-        session["change_request_ids"] = [item["id"] for item in change_requests]
+        session["knowledge_created_ids"] = []
+        session["change_request_ids"] = [item["id"] for item in candidates]
         session["updated_at"] = now_iso()
         self._save_teaching_session(session)
         return {
             "session": copy.deepcopy(session),
             "raw_event": event,
-            "knowledge_created": knowledge_created,
+            "knowledge_created": [],
             "change_requests": change_requests,
+            "candidates": candidates,
         }
 
     def list_candidates(self, status: str = "") -> list[dict[str, Any]]:
@@ -528,6 +533,18 @@ class KnowledgeStore:
             candidate["conflict_with"] = ""
         self._save_record(self.candidates_path, candidate)
         return {"candidate": copy.deepcopy(candidate), "knowledge": copy.deepcopy(knowledge)}
+
+    def delete_knowledge(self, knowledge_id: str) -> dict[str, Any]:
+        """Xoa cung 1 dinh nghia khoi knowledge base (khong khoi phuc duoc)."""
+        knowledge_id = normalize_text(knowledge_id)
+        if not knowledge_id:
+            raise ValueError("Thiếu knowledge_id")
+        record = self._load_knowledge_base()["knowledge"].get(knowledge_id)
+        if not record:
+            raise ValueError(f"Không tìm thấy knowledge: {knowledge_id}")
+        name = record.get("name", "")
+        self._delete_record(self.knowledge_base_path, knowledge_id)
+        return {"deleted": True, "knowledge_id": knowledge_id, "name": name}
 
     def search_knowledge(self, query: str = "") -> list[dict[str, Any]]:
         data = self._load_knowledge_base()
@@ -1368,8 +1385,13 @@ class KnowledgeStore:
         if existing:
             change = self._create_change_candidate(normalized, existing=existing, proposed_by=proposed_by)
             return {"result": "pending_change", "candidate": change, "knowledge": None}
-        knowledge = self._create_knowledge_from_candidate(normalized, created_by=proposed_by)
-        return {"result": "created", "candidate": None, "knowledge": knowledge}
+        # Dinh nghia moi hoan toan: KHONG ghi thang vao KB nua. Day vao hang cho pending_review
+        # de reviewer duyet (feedback #2 & #4). Knowledge that su chi duoc tao khi approve
+        # qua _approve_candidate -> _create_knowledge_from_candidate.
+        normalized["status"] = "pending_review"
+        normalized["proposed_by"] = normalize_text(proposed_by) or normalize_text(normalized.get("owner"))
+        self._save_record(self.candidates_path, normalized)
+        return {"result": "pending_review", "candidate": copy.deepcopy(normalized), "knowledge": None}
 
     def _create_knowledge_from_candidate(
         self,
@@ -1796,8 +1818,8 @@ class KnowledgeStore:
             parsed["pending_action_type"] = "start_teaching"
             parsed["payload"] = {"message": teaching_source or raw_message}
             parsed["answer"] = existing_answer or (
-                "Mình hiểu bạn muốn lưu hoặc cập nhật một định nghĩa. "
-                "Bạn nhắn 'ok' để mình lưu vào từ điển nhé."
+                "Mình hiểu bạn muốn thêm hoặc cập nhật một định nghĩa. "
+                "Bạn nhắn 'ok' để mình ghi nhận và gửi đi duyệt nhé."
             )
             parsed["planner_fallback_reason"] = "forced_teaching_for_knowledge_write"
         parsed["_runtime_skills_used"] = [item.get("name", "") for item in compact_input.get("runtime_skills", []) if item.get("name")]
@@ -3144,10 +3166,11 @@ class KnowledgeStore:
         result = self.confirm_teach_session(session_id=teaching_session_id, decision="confirm")
         chat_session["active_teaching_session_id"] = ""
 
-        knowledge_created = result.get("knowledge_created", [])
-        change_requests = result.get("change_requests", [])
+        candidates = result.get("candidates", [])
+        change_requests = [c for c in candidates if c.get("status") == "pending_change"]
+        new_pending = [c for c in candidates if c.get("status") == "pending_review"]
         fallback_term = (result.get("session", {}).get("draft", {}) or {}).get("name", "")
-        answer = self._plain_teaching_commit_answer(knowledge_created, change_requests, fallback_term)
+        answer = self._plain_teaching_commit_answer(new_pending, change_requests, fallback_term)
 
         response = {
             "status": result.get("session", {}).get("status", "committed"),
@@ -3156,10 +3179,11 @@ class KnowledgeStore:
             "question": message,
             "session_id": teaching_session_id,
             "teaching_session": result.get("session"),
-            "knowledge_created": knowledge_created,
+            "knowledge_created": [],
             "change_requests": change_requests,
+            "candidates": candidates,
             "missing": [],
-            "used_knowledge_ids": [item["id"] for item in knowledge_created],
+            "used_knowledge_ids": [],
             "used_dictionary_ids": [],
             "used_example_ids": [],
             "debug": {"llm_used": self._llm_configured(), "fallback_used": not self._llm_configured()},
@@ -3204,19 +3228,23 @@ class KnowledgeStore:
 
     def _plain_teaching_commit_answer(
         self,
-        knowledge_created: list[dict[str, Any]],
+        new_pending: list[dict[str, Any]],
         change_requests: list[dict[str, Any]],
         fallback_term: str = "",
     ) -> str:
-        """Thong bao ket qua luu bang ngon ngu de hieu (khong dung 'KB', 'commit', 'pending change')."""
-        if knowledge_created:
-            term = knowledge_created[0].get("name", "") or fallback_term
+        """Thong bao ket qua bang ngon ngu de hieu. Moi dinh nghia deu phai qua duyet truoc khi
+        vao tu dien -> khong noi 'da luu' khi chua duoc duyet, chi noi 'da gui cho duyet'."""
+        if new_pending:
+            term = new_pending[0].get("name", "") or fallback_term
             if term:
                 return (
-                    f'Xong rồi, mình đã lưu định nghĩa "{term}" vào từ điển. '
-                    "Từ giờ cả team có thể tra cứu hoặc hỏi mình về nó."
+                    f'Mình đã ghi nhận định nghĩa "{term}" và chuyển vào hàng chờ duyệt. '
+                    "Sau khi được duyệt, cả team có thể tra cứu hoặc hỏi mình về nó."
                 )
-            return "Xong rồi, mình đã lưu định nghĩa này vào từ điển. Cả team có thể tra cứu từ giờ."
+            return (
+                "Mình đã ghi nhận định nghĩa này và chuyển vào hàng chờ duyệt. "
+                "Sau khi được duyệt, cả team có thể tra cứu."
+            )
         if change_requests:
             term = change_requests[0].get("name", "") or fallback_term
             if term:
@@ -3338,15 +3366,15 @@ class KnowledgeStore:
             "status": "needs_confirmation",
             "intent": "teach_knowledge",
             "answer": normalize_text(planner_answer) or (
-                "Mình hiểu là bạn muốn lưu định nghĩa này vào từ điển metric của team. "
-                "Bạn nhắn 'ok' để mình lưu nhé (hoặc 'không' nếu bạn chưa muốn lưu)."
+                "Mình hiểu là bạn muốn thêm định nghĩa này vào từ điển metric của team. "
+                "Bạn nhắn 'ok' để mình ghi nhận và gửi đi duyệt nhé (hoặc 'không' nếu bạn chưa muốn)."
             ),
             "question": message,
             "missing": [
                 {
                     "type": "confirmation",
                     "concept": "start_teaching",
-                    "question": "Bạn muốn mình lưu định nghĩa này vào từ điển metric của team không?",
+                    "question": "Bạn muốn mình ghi nhận định nghĩa này và gửi đi duyệt không?",
                 }
             ],
             "used_knowledge_ids": [],
@@ -3429,6 +3457,7 @@ class KnowledgeStore:
                     "Write the reply yourself in natural, friendly Vietnamese and vary your wording - draft_answer is only a hint, never text to copy verbatim. "
                     "Hard rules you must never break: the Python state is already locked, so do not change status and do not claim any action happened unless locked_state or teaching_outcome confirms it did; never invent data, SQL, tables, columns, or metric definitions. "
                     "Use teaching_outcome to be specific and personable: if result is 'saved', confirm warmly and name the term (mention its definition/formula if given); "
+                    "if result is 'review_requested_new_term', warmly tell them you recorded the definition and sent it to the review queue, name the term, and make clear it is NOT in the dictionary yet but will be searchable once a reviewer approves it - do not claim it was saved; "
                     "if result is 'review_requested_existing_term', gently explain the term already exists so you created a change request for the owner to review and did not overwrite anything; "
                     "if result is 'need_more_info', ask one short concrete question for the missing piece; "
                     "if result is 'awaiting_user_confirmation', briefly restate what you understood and ask the user in a friendly way to confirm, noting they can still adjust. "
@@ -3519,11 +3548,17 @@ class KnowledgeStore:
         response.setdefault("debug", {})["knowledge_write_invariant_blocked"] = True
 
     def _response_committed_knowledge(self, response: dict[str, Any]) -> bool:
+        """True khi luot nay thuc su tao ra mot hanh dong knowledge hop le: hoac da luu vao KB,
+        hoac da gui yeu cau (moi/thay doi) vao hang cho duyet. Dung de invariant guard khong
+        ghi de nham cau tra loi 'da gui cho duyet' thanh 'minh chua luu gi'."""
         if response.get("intent") != "teach_knowledge":
             return False
-        if response.get("status") != "committed":
-            return False
-        return bool(response.get("knowledge_created"))
+        if response.get("status") == "committed" and response.get("knowledge_created"):
+            return True
+        # Moi dinh nghia gio deu vao hang cho duyet -> day cung la ket qua hop le.
+        if response.get("status") == "pending_approval":
+            return bool(response.get("candidates") or response.get("change_requests"))
+        return False
 
     def _answer_synthesis_payload(
         self,
@@ -3576,6 +3611,8 @@ class KnowledgeStore:
             return {}
         created = response.get("knowledge_created") or []
         changes = response.get("change_requests") or []
+        candidates = response.get("candidates") or []
+        new_pending = [c for c in candidates if isinstance(c, dict) and c.get("status") == "pending_review"]
         if created:
             k = created[0] if isinstance(created[0], dict) else {}
             return {
@@ -3587,6 +3624,13 @@ class KnowledgeStore:
         if changes:
             c = changes[0] if isinstance(changes[0], dict) else {}
             return {"result": "review_requested_existing_term", "term": c.get("name", "")}
+        if new_pending:
+            c = new_pending[0]
+            return {
+                "result": "review_requested_new_term",
+                "term": c.get("name", ""),
+                "definition": c.get("definition", ""),
+            }
         draft = response.get("draft") if isinstance(response.get("draft"), dict) else {}
         summary = response.get("summary") if isinstance(response.get("summary"), dict) else {}
         term = normalize_text(draft.get("name") or summary.get("term"))
@@ -4806,6 +4850,19 @@ class KnowledgeStore:
             return
         data = self._load_json(path, default_factory)
         data[container_key][record["id"]] = copy.deepcopy(record)
+        self._save_json(path, data)
+
+    def _delete_record(self, path: Path, record_id: str) -> None:
+        """Xoa cung 1 record (point delete). Hien chi ho tro knowledge_base_path.
+        DB mode: goi delete point + invalidate ref cache. JSON mode: load->pop->save."""
+        if path != self.knowledge_base_path:
+            raise ValueError(f"_delete_record khong ho tro path: {path}")
+        if self.db:
+            self.db.delete_knowledge_record(record_id)
+            self._invalidate_ref_cache(self._ref_cache_key_for_path(path))
+            return
+        data = self._load_json(path, empty_knowledge_base)
+        data["knowledge"].pop(record_id, None)
         self._save_json(path, data)
 
     def _append_jsonl(self, path: Path, record: dict[str, Any]) -> None:

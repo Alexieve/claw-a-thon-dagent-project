@@ -92,6 +92,17 @@ export interface SearchKnowledgeResult {
   knowledge: Knowledge[];
 }
 
+// delete_knowledge (hard delete, no approval)
+export interface DeleteKnowledgePayload {
+  knowledge_id: string;
+}
+export interface DeleteKnowledgeResult {
+  deleted: boolean;
+  knowledge_id: string;
+  name: string;
+  answer?: string;
+}
+
 // analyze_text
 export interface AnalyzeTextResult {
   known: Knowledge[];
@@ -183,6 +194,7 @@ export interface ConfirmTeachSessionResult {
   raw_event?: unknown;
   knowledge_created: Knowledge[];
   change_requests: Candidate[];
+  candidates?: Candidate[];
 }
 
 // storage_status

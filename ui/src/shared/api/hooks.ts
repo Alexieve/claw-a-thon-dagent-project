@@ -10,6 +10,8 @@ import type {
   ChatSessionListResult,
   ConfirmTeachSessionPayload,
   ConfirmTeachSessionResult,
+  DeleteKnowledgePayload,
+  DeleteKnowledgeResult,
   GetChatHistoryResult,
   IngestDocumentPayload,
   IngestDocumentResult,
@@ -69,6 +71,17 @@ export function useReviewCandidate() {
       post<ReviewCandidateResult>({ action: "review_candidate", ...payload }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["candidates"] });
+      qc.invalidateQueries({ queryKey: ["knowledge"] });
+    },
+  });
+}
+
+export function useDeleteKnowledge() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (payload: DeleteKnowledgePayload) =>
+      post<DeleteKnowledgeResult>({ action: "delete_knowledge", ...payload }),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["knowledge"] });
     },
   });

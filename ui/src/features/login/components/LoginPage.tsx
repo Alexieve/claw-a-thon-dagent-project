@@ -22,7 +22,7 @@ export function LoginPage() {
     <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 w-full max-w-sm p-8 space-y-6">
         <div className="flex justify-center">
-          <img src="/logo.png" className="h-10 w-auto" alt="logo" />
+          <img src="/dagent-logo.svg" className="h-12 w-auto" alt="Dagent" />
         </div>
 
         <div className="text-center space-y-1">

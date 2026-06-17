@@ -8,8 +8,8 @@ import {
   useSummarizeTeachSession,
 } from "@/shared/api/hooks";
 import type {
+  Candidate,
   ConfirmTeachSessionResult,
-  Knowledge,
   StartTeachSessionResult,
   TeachSession,
 } from "@/shared/api/types";
@@ -394,7 +394,9 @@ function DoneView({
   result: ConfirmTeachSessionResult;
   onReset: () => void;
 }) {
-  const { knowledge_created, change_requests, session } = result;
+  const { change_requests, session } = result;
+  // Moi dinh nghia (moi hoac thay doi) deu vao hang cho duyet -> gom tat ca vao "candidates".
+  const candidates: Candidate[] = result.candidates ?? change_requests;
   const cancelled = session.status === "cancelled";
 
   if (cancelled) {
@@ -415,32 +417,29 @@ function DoneView({
 
   return (
     <div className="space-y-4">
-      {knowledge_created.length > 0 && (
+      {candidates.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
-            <CheckCircle2 className="w-4 h-4 text-green-600" />
+            <CheckCircle2 className="w-4 h-4 text-amber-600" />
             <span className="text-sm font-medium text-gray-700">
-              {knowledge_created.length} committed directly
+              {candidates.length} definition{candidates.length !== 1 ? "s" : ""} sent for review
             </span>
           </div>
-          {knowledge_created.map((k: Knowledge) => (
-            <div key={k.id} className="bg-green-50 border border-green-200 rounded-lg p-3 space-y-1">
+          {candidates.map((c: Candidate) => (
+            <div key={c.id} className="bg-amber-50 border border-amber-200 rounded-lg p-3 space-y-1">
               <div className="flex items-center gap-2">
-                <span className="font-medium text-gray-800 text-sm">{k.name}</span>
-                <KindBadge kind={k.kind} />
+                <span className="font-medium text-gray-800 text-sm">{c.name}</span>
+                <KindBadge kind={c.kind} />
               </div>
-              <p className="text-xs text-gray-600">{k.canonical_definition}</p>
+              <p className="text-xs text-gray-600">{c.definition}</p>
             </div>
           ))}
-        </div>
-      )}
-
-      {change_requests.length > 0 && (
-        <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
-          {change_requests.length} change request{change_requests.length !== 1 ? "s" : ""} sent for review.{" "}
-          <Link to="/review" className="underline font-medium">
-            Review queue <ArrowRight className="inline w-3 h-3" />
-          </Link>
+          <div className="px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800">
+            Pending approval before they appear in the knowledge base.{" "}
+            <Link to="/review" className="underline font-medium">
+              Review queue <ArrowRight className="inline w-3 h-3" />
+            </Link>
+          </div>
         </div>
       )}
 

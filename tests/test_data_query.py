@@ -165,11 +165,14 @@ class RunDataQueryTest(unittest.TestCase):
         return store
 
     def teach_rpu(self, store):
-        store.teach_text(
+        # Moi dinh nghia gio vao pending_review -> phai approve de co knowledge approved lam context.
+        result = store.teach_text(
             text="RPU là Revenue Per User, doanh thu trung bình trên mỗi active user. Công thức total revenue / active users.",
             stakeholder="Finance",
             team="Revenue",
         )
+        for candidate in result.get("candidates", []):
+            store.review_candidate(candidate_id=candidate["id"], decision="approve")
 
     def add_dictionary(self, store):
         store.add_data_dictionary(

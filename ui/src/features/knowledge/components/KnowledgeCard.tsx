@@ -1,3 +1,5 @@
+import { Loader2, Trash2 } from "lucide-react";
+import { useDeleteKnowledge } from "@/shared/api/hooks";
 import type { Knowledge } from "@/shared/api/types";
 import { KindBadge } from "@/shared/components/ui/badge";
 
@@ -6,11 +8,36 @@ interface KnowledgeCardProps {
 }
 
 export function KnowledgeCard({ item: k }: KnowledgeCardProps) {
+  const { mutate: deleteKnowledge, isPending } = useDeleteKnowledge();
+
+  const handleDelete = () => {
+    const ok = window.confirm(
+      `Xóa vĩnh viễn định nghĩa "${k.name}" khỏi từ điển?\nHành động này không thể hoàn tác.`,
+    );
+    if (ok) deleteKnowledge({ knowledge_id: k.id });
+  };
+
   return (
     <div className="bg-white border border-gray-200 rounded-xl p-4 space-y-3 hover:shadow-sm transition-shadow">
       <div className="flex items-start justify-between gap-2">
         <h3 className="font-semibold text-gray-800">{k.name}</h3>
-        <KindBadge kind={k.kind} />
+        <div className="flex items-center gap-2">
+          <KindBadge kind={k.kind} />
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={isPending}
+            title="Xóa định nghĩa"
+            aria-label={`Xóa định nghĩa ${k.name}`}
+            className="text-gray-300 hover:text-red-500 transition-colors disabled:opacity-50"
+          >
+            {isPending ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Trash2 className="w-4 h-4" />
+            )}
+          </button>
+        </div>
       </div>
 
       <p className="text-sm text-gray-600">{k.canonical_definition}</p>

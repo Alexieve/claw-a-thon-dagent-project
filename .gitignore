@@ -14,3 +14,4 @@ dist/
 build/
 zalopay/
 .claude/launch.json
+ui/.env.production

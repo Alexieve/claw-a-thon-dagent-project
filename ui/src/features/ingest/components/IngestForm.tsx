@@ -74,18 +74,14 @@ export function IngestForm() {
       {result && (
         <div className="bg-green-50 border border-green-200 rounded-xl p-5 space-y-3">
           <h3 className="font-semibold text-green-800 text-sm">Document Ingested</h3>
-          <div className="grid grid-cols-4 gap-3 text-center">
+          <div className="grid grid-cols-3 gap-3 text-center">
             <div className="bg-white rounded-lg border border-green-200 p-3">
               <p className="text-2xl font-bold text-gray-800">{result.chunks.length}</p>
               <p className="text-xs text-gray-500 mt-0.5">Chunks</p>
             </div>
             <div className="bg-white rounded-lg border border-green-200 p-3">
-              <p className="text-2xl font-bold text-gray-800">{result.knowledge_created.length}</p>
-              <p className="text-xs text-gray-500 mt-0.5">Committed</p>
-            </div>
-            <div className="bg-white rounded-lg border border-green-200 p-3">
               <p className="text-2xl font-bold text-gray-800">{result.candidates.length}</p>
-              <p className="text-xs text-gray-500 mt-0.5">Candidates</p>
+              <p className="text-xs text-gray-500 mt-0.5">Pending review</p>
             </div>
             <div className="bg-white rounded-lg border border-green-200 p-3">
               <p className="text-xs font-mono text-gray-600 break-all">{result.document_id}</p>

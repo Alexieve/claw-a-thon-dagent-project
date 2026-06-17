@@ -138,6 +138,13 @@ class PostgresStorage:
                 self._upsert_knowledge(cur, record)
             conn.commit()
 
+    def delete_knowledge_record(self, knowledge_id: str) -> None:
+        """Xoa cung 1 record knowledge theo primary key."""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("delete from knowledge_records where id = %s", (knowledge_id,))
+            conn.commit()
+
     def save_candidate(self, candidate: dict[str, Any]) -> None:
         with self._connect() as conn:
             with conn.cursor() as cur:

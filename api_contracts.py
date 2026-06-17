@@ -80,6 +80,7 @@ class AgentApiRouter:
         self._register("review_candidate", "Approve/reject pending change.", False, self._review_candidate)
         self._register("list_candidates", "Liet ke candidate theo status.", False, self._list_candidates)
         self._register("search_knowledge", "Tim approved knowledge.", True, self._search_knowledge)
+        self._register("delete_knowledge", "Xoa cung 1 dinh nghia khoi KB.", False, self._delete_knowledge)
         self._register("ask_data_question", "Hoi cau hoi data va sinh missing context hoac SQL draft.", False, self._ask_data_question)
         self._register("query_data", "Sinh SQL Postgres, chay tren NEW_DATABASE_URL, tra ve SQL + ket qua query.", True, self._query_data)
         self._register("add_data_dictionary", "Them mapping bang/cot da approved.", False, self._add_data_dictionary)
@@ -134,9 +135,10 @@ class AgentApiRouter:
             domain=self._text(payload.get("domain")),
             owner=self._text(payload.get("owner")),
         )
+        pending = result.get("candidates", [])
         result["answer"] = (
-            f"Da tao {len(result['knowledge_created'])} knowledge moi va {len(result['change_requests'])} pending change."
-            if result["knowledge_created"] or result["change_requests"]
+            f"Da gui {len(pending)} dinh nghia vao hang cho duyet."
+            if pending
             else "Da luu raw event nhung chua parse duoc knowledge ro rang."
         )
         return result
@@ -164,11 +166,10 @@ class AgentApiRouter:
             session_id=self._text(payload.get("session_id")),
             decision=self._text(payload.get("decision")) or "confirm",
         )
+        pending = result.get("candidates", [])
         result["answer"] = (
-            f"Da ghi {len(result['knowledge_created'])} knowledge moi vao KB."
-            if result.get("knowledge_created")
-            else f"Da tao {len(result.get('change_requests', []))} pending change can duyet."
-            if result.get("change_requests")
+            f"Da gui {len(pending)} dinh nghia vao hang cho duyet."
+            if pending
             else "Teaching session da duoc huy."
         )
         return result
@@ -192,6 +193,11 @@ class AgentApiRouter:
 
     def _search_knowledge(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
         return {"knowledge": self.store.search_knowledge(query=self._text(payload.get("query")))}
+
+    def _delete_knowledge(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
+        result = self.store.delete_knowledge(knowledge_id=self._text(payload.get("knowledge_id")))
+        result["answer"] = f"Da xoa dinh nghia \"{result.get('name', '')}\" khoi tu dien."
+        return result
 
     def _ask_data_question(self, payload: dict[str, Any], context: RequestContextLike) -> dict[str, Any]:
         return self.store.ask_data_question(question=self._text(payload.get("question") or payload.get("message")))

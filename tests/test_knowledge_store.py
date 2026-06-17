@@ -157,12 +157,25 @@ class KnowledgeStoreTest(unittest.TestCase):
         store.bootstrap()
         return store
 
+    def seed_knowledge(self, store: KnowledgeStore, **teach_kwargs):
+        """Day mot dinh nghia roi approve ngay de co knowledge approved trong KB.
+        Vi gio teach_text chi tao candidate pending_review (moi dinh nghia deu phai duyet),
+        cac test can knowledge co san phai approve thu cong qua helper nay."""
+        result = store.teach_text(**teach_kwargs)
+        knowledge = None
+        for candidate in result.get("candidates", []):
+            reviewed = store.review_candidate(candidate_id=candidate["id"], decision="approve")
+            if reviewed.get("knowledge"):
+                knowledge = reviewed["knowledge"]
+        return knowledge
+
     def teach_rpu(self, store: KnowledgeStore):
-        return store.teach_text(
+        return self.seed_knowledge(
+            store,
             text="RPU là Revenue Per User, doanh thu trung bình trên mỗi active user. Công thức total revenue / active users.",
             stakeholder="Finance",
             team="Revenue",
-        )["knowledge_created"][0]
+        )
 
     def add_rpu_dictionary(self, store: KnowledgeStore) -> None:
         store.add_data_dictionary(
@@ -214,11 +227,12 @@ class KnowledgeStoreTest(unittest.TestCase):
         )
 
     def teach_arppu(self, store: KnowledgeStore):
-        return store.teach_text(
+        return self.seed_knowledge(
+            store,
             text="ARPPU là Average Revenue Per Paying User, doanh thu trung bình trên mỗi paying user. Công thức total revenue / paying users.",
             stakeholder="Finance",
             team="Revenue",
-        )["knowledge_created"][0]
+        )
 
     def test_extract_acronyms_keeps_order_and_uniqueness(self):
         self.assertEqual(extract_acronyms("FPU and NPU, then FPU again"), ["FPU", "NPU"])
@@ -250,7 +264,7 @@ class KnowledgeStoreTest(unittest.TestCase):
 
         self.assertIn(backend, {"agentbase", "local"})
 
-    def test_teach_text_confirmed_new_knowledge_goes_directly_to_kb(self):
+    def test_teach_text_new_knowledge_goes_to_pending_review(self):
         store = self.make_store()
 
         result = store.teach_text(
@@ -259,10 +273,18 @@ class KnowledgeStoreTest(unittest.TestCase):
             team="Growth",
         )
 
+        # Moi dinh nghia moi gio vao hang cho duyet, KHONG ghi thang vao KB.
         self.assertEqual(result["raw_event"]["source_type"], "manual_text")
         self.assertEqual(result["change_requests"], [])
-        self.assertEqual(len(result["knowledge_created"]), 1)
-        knowledge = result["knowledge_created"][0]
+        self.assertEqual(result["knowledge_created"], [])
+        self.assertEqual(len(result["candidates"]), 1)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["name"], "FPU")
+        self.assertEqual(candidate["status"], "pending_review")
+        self.assertEqual(store.search_knowledge("FPU"), [])
+
+        # Sau khi duyet moi vao KB.
+        knowledge = store.review_candidate(candidate_id=candidate["id"], decision="approve")["knowledge"]
         self.assertEqual(knowledge["name"], "FPU")
         self.assertEqual(knowledge["status"], "approved")
         self.assertEqual(knowledge["owner"], "Linh")
@@ -270,7 +292,7 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertIn("paid user đầu tiên", knowledge["paraphrases"])
         self.assertEqual(store.search_knowledge("FPU")[0]["name"], "FPU")
 
-    def test_teaching_session_confirm_new_knowledge_commits_to_kb(self):
+    def test_teaching_session_confirm_new_knowledge_goes_to_pending_review(self):
         store = self.make_store()
         started = store.start_teach_session(
             message="ARPU là doanh thu trung bình trên mỗi user trong kỳ.",
@@ -281,15 +303,21 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(started["status"], "awaiting_confirmation")
         confirmed = store.confirm_teach_session(session_id=started["session_id"], decision="confirm")
 
-        self.assertEqual(confirmed["session"]["status"], "committed")
-        self.assertEqual(len(confirmed["knowledge_created"]), 1)
-        self.assertEqual(confirmed["knowledge_created"][0]["name"], "ARPU")
+        # Confirm gio chi gui di duyet, chua vao KB.
+        self.assertEqual(confirmed["session"]["status"], "pending_approval")
+        self.assertEqual(confirmed["knowledge_created"], [])
+        self.assertEqual(len(confirmed["candidates"]), 1)
+        candidate = confirmed["candidates"][0]
+        self.assertEqual(candidate["name"], "ARPU")
+        self.assertEqual(candidate["status"], "pending_review")
+        self.assertEqual(store.search_knowledge("ARPU"), [])
+
+        store.review_candidate(candidate_id=candidate["id"], decision="approve")
         self.assertEqual(store.search_knowledge("ARPU")[0]["owner"], "Mai")
 
     def test_existing_knowledge_creates_pending_change_without_updating_kb(self):
         store = self.make_store()
-        created = store.teach_text(text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
-        knowledge = created["knowledge_created"][0]
+        knowledge = self.seed_knowledge(store, text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
 
         second = store.teach_text(text="NPU là Net Promoter User.", stakeholder="Bob", team="Growth")
 
@@ -304,7 +332,7 @@ class KnowledgeStoreTest(unittest.TestCase):
 
     def test_approve_pending_change_updates_kb_version_and_keeps_original_owner(self):
         store = self.make_store()
-        store.teach_text(text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
+        self.seed_knowledge(store, text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
         second = store.teach_text(text="NPU là Net Promoter User.", stakeholder="Bob", team="Growth")
         candidate_id = second["change_requests"][0]["id"]
 
@@ -320,7 +348,7 @@ class KnowledgeStoreTest(unittest.TestCase):
 
     def test_reject_pending_change_keeps_existing_kb(self):
         store = self.make_store()
-        store.teach_text(text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
+        self.seed_knowledge(store, text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
         second = store.teach_text(text="NPU là Net Promoter User.", stakeholder="Bob", team="Growth")
         candidate_id = second["change_requests"][0]["id"]
 
@@ -329,9 +357,26 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(reviewed["candidate"]["status"], "rejected")
         self.assertEqual(store.search_knowledge("NPU")[0]["canonical_definition"], "New Paying User")
 
+    def test_delete_knowledge_removes_definition_from_kb(self):
+        store = self.make_store()
+        knowledge = self.seed_knowledge(store, text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
+        self.assertEqual(store.search_knowledge("NPU")[0]["name"], "NPU")
+
+        result = store.delete_knowledge(knowledge_id=knowledge["id"])
+
+        self.assertTrue(result["deleted"])
+        self.assertEqual(result["name"], "NPU")
+        self.assertEqual(result["knowledge_id"], knowledge["id"])
+        self.assertEqual(store.search_knowledge("NPU"), [])
+
+    def test_delete_knowledge_unknown_id_raises(self):
+        store = self.make_store()
+        with self.assertRaises(ValueError):
+            store.delete_knowledge(knowledge_id="kn_does_not_exist")
+
     def test_small_existing_change_still_requires_approval(self):
         store = self.make_store()
-        store.teach_text(text="FPU là user có first payment.", stakeholder="Alice", team="Growth")
+        self.seed_knowledge(store, text="FPU là user có first payment.", stakeholder="Alice", team="Growth")
         second = store.teach_text(
             text="FPU là user có first payment. Còn gọi là paid user đầu tiên.",
             stakeholder="Bob",
@@ -348,8 +393,8 @@ class KnowledgeStoreTest(unittest.TestCase):
 
     def test_analyze_text_separates_known_pending_and_unknown(self):
         store = self.make_store()
-        store.teach_text(text="FPU là user có first payment.", stakeholder="Alice")
-        store.teach_text(text="NAU là New Active User.", stakeholder="Alice")
+        self.seed_knowledge(store, text="FPU là user có first payment.", stakeholder="Alice")
+        self.seed_knowledge(store, text="NAU là New Active User.", stakeholder="Alice")
         store.teach_text(text="NAU là Net Active User.", stakeholder="Bob")
 
         analysis = store.analyze_text("So sánh FPU, NAU và NPR")
@@ -358,27 +403,30 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual([item["name"] for item in analysis["pending"]], ["NAU"])
         self.assertIn("NPR", analysis["unknown"])
 
-    def test_ingest_document_uses_confirmed_teach_policy(self):
+    def test_ingest_document_creates_pending_review_candidates(self):
         store = self.make_store()
 
         result = store.ingest_document(text="FPU là user có first payment.", title="Metric handbook")
 
         self.assertEqual(len(result["chunks"]), 1)
-        self.assertEqual(len(result["knowledge_created"]), 1)
-        self.assertEqual(result["knowledge_created"][0]["name"], "FPU")
+        self.assertEqual(result["knowledge_created"], [])
+        self.assertEqual(len(result["candidates"]), 1)
+        self.assertEqual(result["candidates"][0]["name"], "FPU")
+        self.assertEqual(result["candidates"][0]["status"], "pending_review")
 
-    def test_fallback_parser_creates_low_confidence_knowledge_for_unknown_acronym(self):
+    def test_fallback_parser_creates_low_confidence_candidate_for_unknown_acronym(self):
         store = self.make_store()
 
         result = store.teach_text(text="Team đang bàn về NPR nhưng chưa thống nhất.")
 
-        self.assertEqual(result["knowledge_created"][0]["name"], "NPR")
-        self.assertLess(result["knowledge_created"][0]["confidence"] if "confidence" in result["knowledge_created"][0] else 0.3, 0.5)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["name"], "NPR")
+        self.assertLess(candidate.get("confidence", 0.3), 0.5)
 
     def test_search_knowledge_uses_llm_ranker_when_available(self):
         store = self.make_store(parser=RankingParser())
-        store.teach_text(text="FPU là user có first payment.")
-        store.teach_text(text="ARPU là doanh thu trung bình trên mỗi user.")
+        self.seed_knowledge(store, text="FPU là user có first payment.")
+        self.seed_knowledge(store, text="ARPU là doanh thu trung bình trên mỗi user.")
 
         result = store.search_knowledge("doanh thu theo user")
 
@@ -387,18 +435,17 @@ class KnowledgeStoreTest(unittest.TestCase):
     def test_parenthetical_acronym_name_is_canonicalized(self):
         store = self.make_store(parser=ParentheticalNameParser())
 
-        result = store.teach_text(text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
+        knowledge = self.seed_knowledge(store, text="NPU là New Paying User.", stakeholder="Alice", team="Growth")
 
-        knowledge = result["knowledge_created"][0]
         self.assertEqual(knowledge["name"], "NPU")
         self.assertIn("NPU (New Paying User)", knowledge["paraphrases"])
         self.assertIn("New Paying User", knowledge["paraphrases"])
 
     def test_acronym_search_does_not_allow_broad_llm_results(self):
         store = self.make_store(parser=BroadRankingParser())
-        store.teach_text(text="FPU là user có first payment.")
-        store.teach_text(text="ARPU là doanh thu trung bình trên mỗi user.")
-        store.teach_text(text="NPU là New Paying User.")
+        self.seed_knowledge(store, text="FPU là user có first payment.")
+        self.seed_knowledge(store, text="ARPU là doanh thu trung bình trên mỗi user.")
+        self.seed_knowledge(store, text="NPU là New Paying User.")
 
         result = store.search_knowledge("NPU")
 
@@ -551,7 +598,8 @@ class KnowledgeStoreTest(unittest.TestCase):
     def test_chat_planner_receives_air_sql_runtime_skill_for_air_question(self):
         llm = CapturingPlannerLLM()
         store = self.make_store(llm_client=llm)
-        store.teach_text(
+        self.seed_knowledge(
+            store,
             text="AOV là Average Order Value, giá trị đơn hàng trung bình.",
             stakeholder="Trang",
             team="Zalopay AIR/OTA",
@@ -583,7 +631,8 @@ class KnowledgeStoreTest(unittest.TestCase):
     def test_chat_can_disable_runtime_skill_per_request(self):
         llm = CapturingPlannerLLM()
         store = self.make_store(llm_client=llm)
-        store.teach_text(
+        self.seed_knowledge(
+            store,
             text="AOV là Average Order Value, giá trị đơn hàng trung bình.",
             stakeholder="Trang",
             team="Zalopay AIR/OTA",
@@ -607,7 +656,8 @@ class KnowledgeStoreTest(unittest.TestCase):
     def test_chat_runtime_skill_config_default_can_be_disabled(self):
         llm = CapturingPlannerLLM()
         store = self.make_store(llm_client=llm, runtime_skills_enabled=False)
-        store.teach_text(
+        self.seed_knowledge(
+            store,
             text="AOV là Average Order Value, giá trị đơn hàng trung bình.",
             stakeholder="Trang",
             team="Zalopay AIR/OTA",
@@ -765,7 +815,7 @@ class KnowledgeStoreTest(unittest.TestCase):
                 ]
             )
         )
-        store.teach_text(text="PU là Paying User, user có phát sinh giao dịch thành công.", stakeholder="BI")
+        self.seed_knowledge(store, text="PU là Paying User, user có phát sinh giao dịch thành công.", stakeholder="BI")
 
         result = store.chat(message="Vậy cho tôi biết một vài số của PU được không?", session_id="vague-pu")
 
@@ -1130,8 +1180,8 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(store.search_knowledge("FPU"), [])
 
     def test_chat_can_teach_confirmed_knowledge(self):
-        # Sau khi user xac nhan MOT lan, neu dinh nghia da du thi agent luu thang,
-        # khong tao them buoc xac nhan commit_teaching nua.
+        # Sau khi user xac nhan MOT lan, agent ghi nhan va gui di duyet (khong tao them
+        # buoc xac nhan commit_teaching nua). Dinh nghia chi vao KB sau khi duoc duyet.
         store = self.make_store(
             llm_client=FakeChatLLM(
                 plans=[
@@ -1158,7 +1208,7 @@ class KnowledgeStoreTest(unittest.TestCase):
         self.assertEqual(proposed["pending_action_type"], "start_teaching")
         self.assertEqual(store.search_knowledge("AOV"), [])
 
-        # Mot lan xac nhan -> luu thang, khong con buoc xac nhan thu hai.
+        # Mot lan xac nhan -> ghi nhan va gui di duyet, khong con buoc xac nhan thu hai.
         confirmed = store.chat(
             message="ok",
             user_id="quynh",
@@ -1167,9 +1217,16 @@ class KnowledgeStoreTest(unittest.TestCase):
         )
 
         self.assertEqual(confirmed["intent"], "teach_knowledge")
-        self.assertEqual(confirmed["status"], "committed")
+        self.assertEqual(confirmed["status"], "pending_approval")
         self.assertFalse(confirmed["requires_confirmation"])
         self.assertEqual(confirmed["pending_action_type"], "")
+        # Chua duyet -> chua vao KB.
+        self.assertEqual(store.search_knowledge("AOV"), [])
+
+        # Duyet xong moi vao KB.
+        pending = store.list_candidates(status="pending_review")
+        self.assertEqual(len(pending), 1)
+        store.review_candidate(candidate_id=pending[0]["id"], decision="approve")
         self.assertEqual(store.search_knowledge("AOV")[0]["name"], "AOV")
 
     def test_chat_new_pending_replaces_previous_pending_action(self):
@@ -1406,12 +1463,16 @@ class TeachingMemoryRegressionTest(unittest.TestCase):
         self.assertTrue(active_id)
 
         turn3 = store.chat(message="FPU là user có first payment", user_id="quynh", session_id="teach-flow")
-        # Bo sung dinh nghia xong la tu dong luu, KHONG bat confirm them mot lan nua.
+        # Bo sung dinh nghia xong la tu dong gui di duyet, KHONG bat confirm them mot lan nua.
         self.assertFalse(turn3["requires_confirmation"])
         self.assertEqual(turn3["pending_action_id"], "")
-        self.assertEqual(turn3["status"], "committed")
-        self.assertTrue(turn3["knowledge_created"])
-        self.assertIn("first payment", turn3["knowledge_created"][0]["canonical_definition"])
+        self.assertEqual(turn3["status"], "pending_approval")
+        self.assertTrue(turn3["candidates"])
+        self.assertIn("first payment", turn3["candidates"][0]["definition"])
+        self.assertEqual(store.search_knowledge("FPU"), [])
+
+        # Duyet xong moi vao KB.
+        store.review_candidate(candidate_id=turn3["candidates"][0]["id"], decision="approve")
         self.assertEqual(store.search_knowledge("FPU")[0]["name"], "FPU")
 
     def test_active_session_redirects_propose_teaching_to_append(self):
@@ -1431,11 +1492,11 @@ class TeachingMemoryRegressionTest(unittest.TestCase):
         self.assertTrue(active_before)
 
         turn3 = store.chat(message="ZZTERM là user có giao dịch thành công", user_id="quynh", session_id="redir-flow")
-        # propose_teaching khi co session active phai bi redirect sang append -> tu luu, khong tao moi.
+        # propose_teaching khi co session active phai bi redirect sang append -> tu gui di duyet, khong tao moi.
         self.assertNotEqual(turn3["pending_action_type"], "start_teaching")
         self.assertFalse(turn3["requires_confirmation"])
-        self.assertEqual(turn3["status"], "committed")
-        self.assertTrue(turn3["knowledge_created"])
+        self.assertEqual(turn3["status"], "pending_approval")
+        self.assertTrue(turn3["candidates"])
         # Khong duoc sinh teaching session thu hai.
         self.assertEqual(len(store._load_teaching_sessions()["sessions"]), 1)
 
